@@ -1,0 +1,21 @@
+{
+  "permissions": {
+    "allow": [
+      "mcp__filesystem__list_directory_with_sizes",
+      "mcp__filesystem__directory_tree",
+      "mcp__filesystem__list_directory",
+      "Bash(go mod tidy:*)",
+      "Bash(go build:*)",
+      "Bash(/tmp/shop:*)",
+      "Bash(cat:*)",
+      "Bash(./shop run:*)",
+      "Bash(./shop status:*)"
+    ]
+  },
+  "enableAllProjectMcpServers": true,
+  "enabledMcpjsonServers": [
+    "lsp",
+    "filesystem",
+    "macos-screen"
+  ]
+}
