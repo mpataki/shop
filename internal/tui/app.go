@@ -3,6 +3,7 @@ package tui
 import (
 	"fmt"
 	"os/exec"
+	"path/filepath"
 	"syscall"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -82,8 +83,9 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err != nil {
 			a.err = msg.err
 		}
-		// Session opened in separate terminal, quit TUI
-		return a, tea.Quit
+		// Session ended, return to run list
+		a.view = ViewRunList
+		return a, a.loadRuns
 	}
 
 	return a, nil
@@ -160,8 +162,9 @@ func (a *App) handleRunDetailKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "enter":
 		if len(a.executions) > 0 && a.selectedExecIdx < len(a.executions) {
 			exec := a.executions[a.selectedExecIdx]
-			if exec.ClaudeSessionID != "" {
-				return a, a.resumeSession(exec.ClaudeSessionID)
+			if exec.ClaudeSessionID != "" && a.selectedRun != nil {
+				workDir := filepath.Join(a.selectedRun.WorkspacePath, "repo")
+				return a, a.resumeSession(exec.ClaudeSessionID, workDir)
 			}
 		}
 	}
@@ -389,19 +392,12 @@ func (a *App) killRun(id int64) tea.Cmd {
 	}
 }
 
-func (a *App) resumeSession(sessionID string) tea.Cmd {
-	return func() tea.Msg {
-		cmd := exec.Command("claude", "--resume", sessionID)
-		cmd.Stdin = nil
-		cmd.Stdout = nil
-		cmd.Stderr = nil
-
-		if err := cmd.Start(); err != nil {
-			return sessionResumedMsg{sessionID: sessionID, err: err}
-		}
-
-		return sessionResumedMsg{sessionID: sessionID}
-	}
+func (a *App) resumeSession(sessionID string, workDir string) tea.Cmd {
+	cmd := exec.Command("claude", "--resume", sessionID)
+	cmd.Dir = workDir
+	return tea.ExecProcess(cmd, func(err error) tea.Msg {
+		return sessionResumedMsg{sessionID: sessionID, err: err}
+	})
 }
 
 func truncate(s string, maxLen int) string {
