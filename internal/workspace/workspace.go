@@ -6,7 +6,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strings"
 )
 
 type Workspace struct {
@@ -38,7 +37,7 @@ func Create(baseDir string, runID int64, sourceRepo string) (*Workspace, error) 
 
 	// Create repo via git worktree if source repo provided
 	if sourceRepo != "" {
-		if err := w.createWorktree(sourceRepo); err != nil {
+		if err := w.createWorktree(sourceRepo, runID); err != nil {
 			return nil, err
 		}
 	} else {
@@ -70,7 +69,7 @@ func Create(baseDir string, runID int64, sourceRepo string) (*Workspace, error) 
 	return w, nil
 }
 
-func (w *Workspace) createWorktree(sourceRepo string) error {
+func (w *Workspace) createWorktree(sourceRepo string, runID int64) error {
 	// Resolve to absolute path
 	absRepo, err := filepath.Abs(sourceRepo)
 	if err != nil {
@@ -84,17 +83,11 @@ func (w *Workspace) createWorktree(sourceRepo string) error {
 		return fmt.Errorf("%s is not a git repository", absRepo)
 	}
 
-	// Get current commit SHA (detached worktree at current HEAD)
-	cmd = exec.Command("git", "rev-parse", "HEAD")
-	cmd.Dir = absRepo
-	shaOut, err := cmd.Output()
-	if err != nil {
-		return fmt.Errorf("failed to get HEAD: %w", err)
-	}
-	sha := strings.TrimSpace(string(shaOut))
+	// Create a new branch for this run
+	branchName := fmt.Sprintf("shop/run-%d", runID)
 
-	// Create detached worktree at current HEAD
-	cmd = exec.Command("git", "worktree", "add", "--detach", w.RepoPath, sha)
+	// Create worktree with new branch at current HEAD
+	cmd = exec.Command("git", "worktree", "add", "-b", branchName, w.RepoPath)
 	cmd.Dir = absRepo
 	if output, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("failed to create worktree: %s", string(output))

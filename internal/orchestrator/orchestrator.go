@@ -4,7 +4,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
+	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -332,6 +335,20 @@ func (o *Orchestrator) ResumeSession(sessionID string) error {
 	return cmd.Start()
 }
 
+// Read methods for TUI
+
+func (o *Orchestrator) ListRuns(limit int) ([]*models.Run, error) {
+	return o.storage.ListRuns(limit)
+}
+
+func (o *Orchestrator) GetRun(id int64) (*models.Run, error) {
+	return o.storage.GetRun(id)
+}
+
+func (o *Orchestrator) GetExecutionsForRun(runID int64) ([]*models.Execution, error) {
+	return o.storage.GetExecutionsForRun(runID)
+}
+
 func (o *Orchestrator) KillRun(runID int64) error {
 	run, err := o.storage.GetRun(runID)
 	if err != nil {
@@ -360,4 +377,63 @@ func (o *Orchestrator) KillRun(runID int64) error {
 	run.Status = models.RunStatusFailed
 	run.CompletedAt = &now
 	return o.storage.UpdateRun(run)
+}
+
+func (o *Orchestrator) DeleteRun(runID int64) error {
+	run, err := o.storage.GetRun(runID)
+	if err != nil {
+		return fmt.Errorf("failed to get run: %w", err)
+	}
+
+	repoPath := run.WorkspacePath + "/repo"
+	branchName := fmt.Sprintf("shop/run-%d", runID)
+
+	// Find the source repo from the worktree's .git file
+	sourceRepo := o.findSourceRepo(repoPath)
+
+	// Remove git worktree and branch if source repo found
+	if sourceRepo != "" {
+		// Remove worktree
+		cmd := exec.Command("git", "worktree", "remove", "--force", repoPath)
+		cmd.Dir = sourceRepo
+		cmd.CombinedOutput() // Ignore errors
+
+		// Delete the branch
+		cmd = exec.Command("git", "branch", "-D", branchName)
+		cmd.Dir = sourceRepo
+		cmd.CombinedOutput() // Ignore errors
+	}
+
+	// Remove workspace directory
+	if run.WorkspacePath != "" {
+		os.RemoveAll(run.WorkspacePath)
+	}
+
+	// Delete from database
+	return o.storage.DeleteRun(runID)
+}
+
+// findSourceRepo extracts the main repo path from a worktree's .git file
+func (o *Orchestrator) findSourceRepo(worktreePath string) string {
+	gitFile := filepath.Join(worktreePath, ".git")
+	data, err := os.ReadFile(gitFile)
+	if err != nil {
+		return ""
+	}
+
+	// .git file contains: "gitdir: /path/to/main/.git/worktrees/run-N"
+	content := string(data)
+	if !strings.HasPrefix(content, "gitdir: ") {
+		return ""
+	}
+
+	gitDir := strings.TrimSpace(content[8:])
+	// Navigate up from .git/worktrees/run-N to the main repo
+	// gitDir looks like: /path/to/repo/.git/worktrees/run-N
+	// Find .git in the path and return everything before it
+	idx := strings.LastIndex(gitDir, "/.git/")
+	if idx == -1 {
+		return ""
+	}
+	return gitDir[:idx]
 }
