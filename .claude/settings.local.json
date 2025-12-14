@@ -9,7 +9,10 @@
       "Bash(/tmp/shop:*)",
       "Bash(cat:*)",
       "Bash(./shop run:*)",
-      "Bash(./shop status:*)"
+      "Bash(./shop status:*)",
+      "Bash(find:*)",
+      "Bash(grep:*)",
+      "Bash(git -C /Users/mat/code/shop log --oneline)"
     ]
   },
   "enableAllProjectMcpServers": true,
