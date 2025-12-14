@@ -27,7 +27,6 @@ const (
 
 type App struct {
 	orchestrator *orchestrator.Orchestrator
-	specs        map[string]*models.Spec
 
 	view            View
 	runs            []*models.Run
@@ -42,10 +41,9 @@ type App struct {
 	err    error
 }
 
-func NewApp(orch *orchestrator.Orchestrator, specs map[string]*models.Spec) *App {
+func NewApp(orch *orchestrator.Orchestrator) *App {
 	return &App{
 		orchestrator: orch,
-		specs:        specs,
 		view:         ViewRunList,
 	}
 }
@@ -483,14 +481,9 @@ func (a *App) formatSignalStatus(status string) string {
 func (a *App) viewNewRun() string {
 	s := titleStyle.Render("New Run") + "\n\n"
 
-	s += "Available specs:\n"
-	for name := range a.specs {
-		s += fmt.Sprintf("  • %s\n", name)
-	}
-
-	if len(a.specs) == 0 {
-		s += "  (no specs found)\n"
-	}
+	s += "Use the CLI to start a new run:\n\n"
+	s += "  shop run <spec> <prompt>\n\n"
+	s += "Specs are Lua files in .shop/specs/ or ~/.shop/specs/\n"
 
 	s += "\n" + helpStyle.Render("[esc] cancel")
 

@@ -7,7 +7,6 @@ require (
 	github.com/charmbracelet/lipgloss v1.1.0
 	github.com/spf13/cobra v1.9.1
 	github.com/yuin/gopher-lua v1.1.1
-	gopkg.in/yaml.v3 v3.0.1
 	modernc.org/sqlite v1.37.1
 )
 
