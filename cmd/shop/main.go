@@ -3,9 +3,12 @@ package main
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
+	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
+	shopLua "github.com/mpataki/shop/internal/lua"
 	"github.com/mpataki/shop/internal/config"
 	"github.com/mpataki/shop/internal/orchestrator"
 	"github.com/mpataki/shop/internal/spec"
@@ -23,6 +26,7 @@ func main() {
 	}
 
 	rootCmd.AddCommand(newRunCommand())
+	rootCmd.AddCommand(newResumeCommand())
 	rootCmd.AddCommand(newStatusCommand())
 	rootCmd.AddCommand(newListCommand())
 	rootCmd.AddCommand(newKillCommand())
@@ -89,6 +93,15 @@ func newRunCommand() *cobra.Command {
 			}
 			defer store.Close()
 
+			orch := orchestrator.New(store, cfg.WorkspacesDir())
+
+			// Check if this is a Lua spec
+			luaSpecPath := findLuaSpec(specName, cfg)
+			if luaSpecPath != "" {
+				return runLuaSpec(orch, luaSpecPath, specName, prompt, repoPath, noExec)
+			}
+
+			// Fall back to YAML spec
 			specs, err := spec.LoadAll([]string{cfg.ProjectSpecDir, cfg.UserSpecDir})
 			if err != nil {
 				return err
@@ -98,8 +111,6 @@ func newRunCommand() *cobra.Command {
 			if !ok {
 				return fmt.Errorf("spec %q not found", specName)
 			}
-
-			orch := orchestrator.New(store, cfg.WorkspacesDir())
 
 			run, err := orch.StartRun(s, prompt, repoPath)
 			if err != nil {
@@ -127,6 +138,135 @@ func newRunCommand() *cobra.Command {
 	cmd.Flags().Bool("no-exec", false, "Create run but don't execute")
 	cmd.Flags().StringP("repo", "r", ".", "Source git repository for worktree (default: current directory)")
 	return cmd
+}
+
+// findLuaSpec looks for a Lua spec file in the standard locations
+func findLuaSpec(name string, cfg *config.Config) string {
+	// Check project directory first (.shop/specs/)
+	dirs := []string{cfg.ProjectSpecDir, cfg.UserSpecDir}
+
+	for _, dir := range dirs {
+		// Try exact name if it ends with .lua
+		if strings.HasSuffix(name, ".lua") {
+			path := filepath.Join(dir, name)
+			if _, err := os.Stat(path); err == nil {
+				return path
+			}
+		}
+
+		// Try adding .lua extension
+		path := filepath.Join(dir, name+".lua")
+		if _, err := os.Stat(path); err == nil {
+			return path
+		}
+	}
+
+	return ""
+}
+
+// runLuaSpec runs a Lua workflow spec
+func runLuaSpec(orch *orchestrator.Orchestrator, specPath, specName, prompt, repoPath string, noExec bool) error {
+	// Verify it's a valid Lua spec
+	if !shopLua.IsLuaSpec(specPath) {
+		return fmt.Errorf("not a Lua spec: %s", specPath)
+	}
+
+	run, err := orch.StartLuaRun(specPath, specName, prompt, repoPath)
+	if err != nil {
+		return fmt.Errorf("failed to start run: %w", err)
+	}
+
+	fmt.Printf("Created run #%d (Lua workflow)\n", run.ID)
+	fmt.Printf("Workspace: %s\n", run.WorkspacePath)
+	fmt.Printf("Spec: %s\n", specPath)
+
+	if noExec {
+		fmt.Println("Skipping execution (--no-exec)")
+		return nil
+	}
+
+	fmt.Printf("Executing Lua workflow %q...\n", specName)
+	if err := orch.ExecuteLua(run); err != nil {
+		// Re-fetch run to get updated status
+		run, _ = orch.GetRun(run.ID)
+		if run != nil {
+			fmt.Printf("Run completed with status: %s\n", run.Status)
+			if run.Error != "" {
+				fmt.Printf("Error: %s\n", run.Error)
+			}
+		}
+		return fmt.Errorf("execution failed: %w", err)
+	}
+
+	// Re-fetch run to get updated status
+	run, _ = orch.GetRun(run.ID)
+	if run != nil {
+		fmt.Printf("Run completed with status: %s\n", run.Status)
+	}
+	return nil
+}
+
+func newResumeCommand() *cobra.Command {
+	return &cobra.Command{
+		Use:   "resume <run-id>",
+		Short: "Resume an interrupted run",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			runID, err := strconv.ParseInt(args[0], 10, 64)
+			if err != nil {
+				return fmt.Errorf("invalid run ID: %w", err)
+			}
+
+			cfg, err := config.New()
+			if err != nil {
+				return err
+			}
+
+			if err := cfg.EnsureDataDir(); err != nil {
+				return err
+			}
+
+			store, err := storage.New(cfg.DBPath)
+			if err != nil {
+				return err
+			}
+			defer store.Close()
+
+			orch := orchestrator.New(store, cfg.WorkspacesDir())
+
+			run, err := orch.GetRun(runID)
+			if err != nil {
+				return fmt.Errorf("failed to get run: %w", err)
+			}
+
+			// Check if this is a Lua workflow
+			if run.SpecPath == "" {
+				return fmt.Errorf("run %d is not a Lua workflow (resume only works with Lua specs)", runID)
+			}
+
+			fmt.Printf("Resuming run #%d (Lua workflow)\n", runID)
+			fmt.Printf("Spec: %s\n", run.SpecPath)
+
+			if err := orch.ResumeLuaRun(runID); err != nil {
+				// Re-fetch run to get updated status
+				run, _ = orch.GetRun(runID)
+				if run != nil {
+					fmt.Printf("Run completed with status: %s\n", run.Status)
+					if run.Error != "" {
+						fmt.Printf("Error: %s\n", run.Error)
+					}
+				}
+				return fmt.Errorf("resume failed: %w", err)
+			}
+
+			// Re-fetch run to get updated status
+			run, _ = orch.GetRun(runID)
+			if run != nil {
+				fmt.Printf("Run completed with status: %s\n", run.Status)
+			}
+			return nil
+		},
+	}
 }
 
 func newStatusCommand() *cobra.Command {
@@ -164,8 +304,14 @@ func newStatusCommand() *cobra.Command {
 			fmt.Printf("Status: %s\n", run.Status)
 			fmt.Printf("Prompt: %s\n", run.InitialPrompt)
 			fmt.Printf("Workspace: %s\n", run.WorkspacePath)
+			if run.SpecPath != "" {
+				fmt.Printf("Spec Path: %s (Lua workflow)\n", run.SpecPath)
+			}
 			if run.CurrentAgent != "" {
 				fmt.Printf("Current Agent: %s\n", run.CurrentAgent)
+			}
+			if run.Error != "" {
+				fmt.Printf("Error: %s\n", run.Error)
 			}
 
 			execs, err := store.GetExecutionsForRun(runID)
@@ -180,7 +326,12 @@ func newStatusCommand() *cobra.Command {
 					if exec.ExitCode != nil {
 						status += fmt.Sprintf(" (exit %d)", *exec.ExitCode)
 					}
-					fmt.Printf("  %d. %s [%s]\n", exec.SequenceNum, exec.AgentName, status)
+					// Show call_index for Lua workflows
+					if exec.CallIndex > 0 {
+						fmt.Printf("  [%d] %s [%s]\n", exec.CallIndex, exec.AgentName, status)
+					} else {
+						fmt.Printf("  %d. %s [%s]\n", exec.SequenceNum, exec.AgentName, status)
+					}
 				}
 			}
 

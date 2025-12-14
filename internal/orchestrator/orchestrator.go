@@ -11,6 +11,7 @@ import (
 	"syscall"
 	"time"
 
+	shopLua "github.com/mpataki/shop/internal/lua"
 	"github.com/mpataki/shop/internal/models"
 	"github.com/mpataki/shop/internal/storage"
 	"github.com/mpataki/shop/internal/workspace"
@@ -340,6 +341,99 @@ func (o *Orchestrator) ResumeSession(sessionID string) error {
 	cmd.Stdout = nil
 	cmd.Stderr = nil
 	return cmd.Start()
+}
+
+// StartLuaRun creates a new run for a Lua workflow
+func (o *Orchestrator) StartLuaRun(specPath, specName, prompt, sourceRepo string) (*models.Run, error) {
+	// Create run record
+	run := &models.Run{
+		InitialPrompt: prompt,
+		SpecName:      specName,
+		SpecPath:      specPath,
+		Status:        models.RunStatusPending,
+	}
+
+	runID, err := o.storage.CreateRun(run)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create run: %w", err)
+	}
+	run.ID = runID
+
+	// Create workspace
+	ws, err := workspace.Create(o.workspaceDir, runID, sourceRepo)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create workspace: %w", err)
+	}
+
+	run.WorkspacePath = ws.Path
+	if err := o.storage.UpdateRun(run); err != nil {
+		return nil, fmt.Errorf("failed to update run with workspace path: %w", err)
+	}
+
+	// Initialize context file
+	if err := ws.InitContext(specName, prompt); err != nil {
+		return nil, fmt.Errorf("failed to initialize context: %w", err)
+	}
+
+	return run, nil
+}
+
+// ExecuteLua runs a Lua workflow
+func (o *Orchestrator) ExecuteLua(run *models.Run) error {
+	ws, err := workspace.Open(o.workspaceDir, run.ID)
+	if err != nil {
+		return err
+	}
+
+	// Update run status to running
+	run.Status = models.RunStatusRunning
+	if err := o.storage.UpdateRun(run); err != nil {
+		return err
+	}
+
+	// Create and execute the Lua runtime
+	runtime := shopLua.NewRuntime(o.storage, run, ws)
+	err = runtime.Execute(run.SpecPath, run.InitialPrompt)
+
+	// Log any messages from the workflow
+	for _, log := range runtime.GetLogs() {
+		fmt.Printf("[lua] %s\n", log)
+	}
+
+	if err != nil {
+		// Mark run as failed if not already stuck
+		if run.Status != models.RunStatusStuck {
+			now := time.Now()
+			run.Status = models.RunStatusFailed
+			run.CompletedAt = &now
+			run.Error = err.Error()
+			o.storage.UpdateRun(run)
+		}
+		return err
+	}
+
+	return nil
+}
+
+// ResumeLuaRun resumes a Lua workflow from where it left off
+func (o *Orchestrator) ResumeLuaRun(runID int64) error {
+	run, err := o.storage.GetRun(runID)
+	if err != nil {
+		return fmt.Errorf("failed to get run: %w", err)
+	}
+
+	if run.SpecPath == "" {
+		return fmt.Errorf("run %d is not a Lua workflow", runID)
+	}
+
+	// Reset status to running
+	run.Status = models.RunStatusRunning
+	run.CompletedAt = nil
+	if err := o.storage.UpdateRun(run); err != nil {
+		return err
+	}
+
+	return o.ExecuteLua(run)
 }
 
 // Read methods for TUI

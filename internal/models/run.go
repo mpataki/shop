@@ -21,4 +21,6 @@ type Run struct {
 	WorkspacePath string
 	Status        RunStatus
 	CurrentAgent  string
+	SpecPath      string // path to .lua spec file (for Lua workflows)
+	Error         string // error message if run failed
 }

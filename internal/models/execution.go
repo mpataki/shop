@@ -23,4 +23,6 @@ type Execution struct {
 	OutputSignal    map[string]any
 	SequenceNum     int
 	PID             *int
+	CallIndex       int    // position in Lua script execution (for Lua workflows)
+	Prompt          string // prompt passed to this specific run() call
 }
