@@ -148,6 +148,35 @@ func (w *Workspace) CreateAgentScratchpad(agentName string) error {
 	return os.MkdirAll(path, 0755)
 }
 
+func (w *Workspace) InitContext(specName, prompt string) error {
+	path := filepath.Join(w.RepoPath, ".agents", "context.md")
+	content := fmt.Sprintf("# Run Context\n\n**Workflow:** %s\n\n**Task:** %s\n\n---\n\n", specName, prompt)
+	return os.WriteFile(path, []byte(content), 0644)
+}
+
+func (w *Workspace) AppendContext(agentName string, signal map[string]any) error {
+	path := filepath.Join(w.RepoPath, ".agents", "context.md")
+
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	// Extract summary if present, otherwise use full signal
+	var entry string
+	if summary, ok := signal["summary"].(string); ok {
+		status, _ := signal["status"].(string)
+		entry = fmt.Sprintf("## %s\n\n**Status:** %s\n\n%s\n\n---\n\n", agentName, status, summary)
+	} else {
+		signalJSON, _ := json.MarshalIndent(signal, "", "  ")
+		entry = fmt.Sprintf("## %s\n\n```json\n%s\n```\n\n---\n\n", agentName, string(signalJSON))
+	}
+
+	_, err = f.WriteString(entry)
+	return err
+}
+
 func (w *Workspace) writeSkillFile() error {
 	skillPath := filepath.Join(w.RepoPath, ".agents", "SKILL.md")
 	return os.WriteFile(skillPath, []byte(skillContent), 0644)
@@ -165,36 +194,27 @@ codebase before and after you.
 
 ## Reading Context
 
-1. Check ` + "`" + `.shop/run.json` + "`" + ` for run metadata and your role
-2. Read ` + "`" + `.agents/messages/*.md` + "`" + ` in order for notes from previous agents
-3. Your predecessors may have left context about decisions or blockers
-
-## Leaving Context for Next Agent
-
-Write to ` + "`" + `.agents/messages/{NNN}-{your-role}.md` + "`" + `:
-- Increment the number from the last message
-- Be concise—what does the next agent need to know?
-- Don't duplicate what's obvious from code or commits
+1. Read ` + "`" + `.agents/context.md` + "`" + ` for the task description and notes from previous agents
+2. Check ` + "`" + `.shop/run.json` + "`" + ` for run metadata if needed
 
 ## Signaling Completion
 
 **IMPORTANT:** When your work is complete, write your decision to:
 ` + "`" + `.agents/signals/{your-role}.json` + "`" + `
 
-Use the schema defined for your role. Example:
+Include a ` + "`" + `summary` + "`" + ` field with key information for the next agent. Example:
 ` + "```" + `json
-{"status": "APPROVED", "summary": "Code looks good, no issues found"}
+{"status": "DONE", "summary": "Implemented feature X. Note: Y needs attention."}
 ` + "```" + `
 
 Valid status values depend on your role—check the orchestration spec.
 
 ## Private Workspace
 
-Use ` + "`" + `.agents/scratchpad/{your-role}/` + "`" + ` for drafts, notes, or intermediate work.
-No guarantee anyone reads this.
+Use ` + "`" + `.agents/scratchpad/{your-role}/` + "`" + ` for drafts or intermediate work.
 
 ## Git Commits
 
 Make atomic commits with clear messages. The commit history is part of
-the communication trail. Don't squash—preserve the narrative.
+the communication trail.
 `

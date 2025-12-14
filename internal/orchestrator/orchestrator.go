@@ -60,6 +60,11 @@ func (o *Orchestrator) StartRun(spec *models.Spec, prompt string, sourceRepo str
 		return nil, fmt.Errorf("failed to update run with workspace path: %w", err)
 	}
 
+	// Initialize context file
+	if err := ws.InitContext(spec.Name, prompt); err != nil {
+		return nil, fmt.Errorf("failed to initialize context: %w", err)
+	}
+
 	return run, nil
 }
 
@@ -72,8 +77,6 @@ func (o *Orchestrator) Execute(run *models.Run, spec *models.Spec) error {
 	currentAgent := spec.Start
 	iteration := 0
 	var previousAgents []string
-	var lastSignal map[string]any
-	var lastAgentName string
 
 	// Update run status to running
 	run.Status = models.RunStatusRunning
@@ -124,9 +127,9 @@ func (o *Orchestrator) Execute(run *models.Run, spec *models.Spec) error {
 		}
 		exec.ID = execID
 
-		// Build prompt with context from previous agent
+		// Build prompt
 		agentDef := spec.Agents[currentAgent]
-		agentPrompt := o.buildPrompt(spec, currentAgent, run, agentDef, lastAgentName, lastSignal)
+		agentPrompt := o.buildPrompt(spec, currentAgent, run, agentDef, iteration == 1)
 
 		// Run the agent
 		now := time.Now()
@@ -136,7 +139,7 @@ func (o *Orchestrator) Execute(run *models.Run, spec *models.Spec) error {
 			return err
 		}
 
-		sessionID, exitCode, err := o.runClaudeAgent(ws.RepoPath, agentPrompt, exec.ID)
+		sessionID, exitCode, err := o.runClaudeAgent(ws.RepoPath, currentAgent, agentPrompt, exec.ID)
 		if err != nil {
 			exec.Status = models.ExecStatusFailed
 			o.storage.UpdateExecution(exec)
@@ -162,6 +165,11 @@ func (o *Orchestrator) Execute(run *models.Run, spec *models.Spec) error {
 			return err
 		}
 
+		// Append agent's output to context for next agent
+		if err := ws.AppendContext(currentAgent, signal); err != nil {
+			return fmt.Errorf("failed to append context: %w", err)
+		}
+
 		// Evaluate transitions
 		nextAgent := o.evaluateTransitions(spec, currentAgent, signal)
 
@@ -172,28 +180,20 @@ func (o *Orchestrator) Execute(run *models.Run, spec *models.Spec) error {
 			return o.stuckRun(run, "agent signaled blocked")
 		}
 
-		// Store context for next agent
-		lastAgentName = currentAgent
-		lastSignal = signal
-
 		previousAgents = append(previousAgents, currentAgent)
 		currentAgent = nextAgent
 	}
 }
 
-func (o *Orchestrator) buildPrompt(spec *models.Spec, agentName string, run *models.Run, agentDef *models.AgentDef, prevAgentName string, prevSignal map[string]any) string {
-	// Start with the initial prompt for the first agent
+func (o *Orchestrator) buildPrompt(spec *models.Spec, agentName string, run *models.Run, agentDef *models.AgentDef, isFirstAgent bool) string {
 	prompt := run.InitialPrompt
 
-	// Add context from previous agent if available
-	if prevAgentName != "" && prevSignal != nil {
-		prompt += fmt.Sprintf("\n\n---\nFeedback from '%s' agent:\n", prevAgentName)
-		signalJSON, _ := json.MarshalIndent(prevSignal, "", "  ")
-		prompt += string(signalJSON)
-		prompt += "\n\nPlease address the feedback above."
+	// Direct agent to read context file for history
+	if !isFirstAgent {
+		prompt += "\n\n---\n"
+		prompt += "IMPORTANT: Read `.agents/context.md` for context from previous agents before starting work."
 	}
 
-	// Add agent-specific context
 	prompt += fmt.Sprintf("\n\nYou are the '%s' agent in the '%s' workflow.", agentName, spec.Name)
 
 	// Add output schema expectations with explicit instructions
@@ -227,13 +227,20 @@ func (o *Orchestrator) buildPrompt(spec *models.Spec, agentName string, run *mod
 	return prompt
 }
 
-func (o *Orchestrator) runClaudeAgent(workDir, prompt string, execID int64) (sessionID string, exitCode int, err error) {
-	cmd := exec.Command("claude",
+func (o *Orchestrator) runClaudeAgent(workDir, agentName, prompt string, execID int64) (sessionID string, exitCode int, err error) {
+	args := []string{
 		"-p", prompt,
 		"--output-format", "json",
 		"--dangerously-skip-permissions",
 		"--max-turns", "10",
-	)
+	}
+
+	// Use Claude Code's agent definition if it exists
+	if agentName != "" {
+		args = append([]string{"--agent", agentName}, args...)
+	}
+
+	cmd := exec.Command("claude", args...)
 	cmd.Dir = workDir
 
 	// Start the process
