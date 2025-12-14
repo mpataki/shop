@@ -10,9 +10,7 @@ type Spec struct {
 }
 
 type AgentDef struct {
-	Definition   string                 `yaml:"definition"`
-	Model        string                 `yaml:"model"`
-	OutputSchema map[string]*FieldDef   `yaml:"output_schema"`
+	OutputSchema map[string]*FieldDef `yaml:"output_schema"`
 }
 
 type FieldDef struct {
