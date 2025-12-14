@@ -1,6 +1,6 @@
 # Shop
 
-Claude Agent Orchestration System. Coordinates multiple Claude Code agents through YAML-defined workflows.
+Claude Agent Orchestration System. Coordinates multiple Claude Code agents through Lua workflow scripts with human-in-the-loop support.
 
 ## Quick Start
 
@@ -17,9 +17,19 @@ go build -o shop ./cmd/shop
 # View status
 ./shop status <run-id>
 ./shop list
+./shop list --active  # Only active runs
 
 # Kill a running workflow
 ./shop kill <run-id>
+
+# Continue a waiting workflow (human interaction)
+./shop continue <run-id>
+
+# Stop a waiting workflow
+./shop stop <run-id> --reason "Changed approach"
+
+# Resume workflow after human interaction
+./shop resume <run-id>
 
 # Launch TUI
 ./shop
@@ -27,56 +37,47 @@ go build -o shop ./cmd/shop
 
 ## Specs
 
-Workflow specs define agents and transitions. Place them in `~/.shop/specs/` or `.shop/specs/`:
+Workflow specs are Lua scripts that define a `workflow(prompt)` function. Place them in `~/.shop/specs/` or `.shop/specs/`:
 
-```yaml
-name: code-review-loop
-description: Iterative coding with review feedback
-start: coder
+```lua
+-- code-review-loop.lua
+function workflow(prompt)
+  run("architect", prompt)
 
-agents:
-  coder:
-    output_schema:
-      status:
-        type: enum
-        values: [DONE, BLOCKED]
-      summary:
-        type: string
+  for i = 1, 10 do
+    local code = run("coder")
+    if code.status == "BLOCKED" then
+      return stuck(code.reason)
+    end
 
-  reviewer:
-    output_schema:
-      status:
-        type: enum
-        values: [APPROVED, CHANGES_REQUESTED, BLOCKED]
-      issues:
-        type: array
-        optional: true
+    local review = run("reviewer")
+    if review.status == "APPROVED" then
+      break
+    end
+  end
 
-transitions:
-  - from: coder
-    to: reviewer
+  -- Optional: pause for human approval before deployment
+  local ok = pause("Approve for production?")
+  if not ok.continue then
+    return stuck(ok.reason)
+  end
 
-  - from: reviewer
-    to: END
-    when:
-      status: APPROVED
-
-  - from: reviewer
-    to: coder
-    # fallback: loop back for changes
-
-settings:
-  max_iterations: 10
+  run("deployer")
+end
 ```
+
+Agents must exist as `.claude/agents/{name}.md` in your repository.
 
 ## How It Works
 
 1. `shop run` creates a detached git worktree from your repo
-2. First agent receives your prompt and runs via `claude -p`
-3. Agent writes structured output to `.agents/signals/{agent}.json`
-4. Shop evaluates transitions to determine next agent
-5. Next agent receives previous agent's feedback
-6. Loop continues until `END` or `STUCK`
+2. Lua workflow script executes, calling `run()` for each agent
+3. Each agent runs via `claude --agent {name} -p {prompt}`
+4. Agent writes structured output to `.agents/signals/{agent}.json`
+5. Signal is returned to Lua script which decides next action
+6. If agent returns `NEEDS_HUMAN` or script calls `pause()`, workflow pauses
+7. Human uses `shop continue` to interact with agent, then `shop resume`
+8. Loop continues until script returns or calls `stuck()`
 
 ## Workspace Structure
 
@@ -102,21 +103,50 @@ Shop
 
 Recent Runs
 ───────────
-▶ #42 code-review-loop    ● running   Refactor auth module...
-  #41 simple-task         ✓ complete  Add fibonacci function...
-  #40 code-review-loop    ✗ failed    Fix the bug in...
+▶ #42 code-review-loop    ⏸ waiting   Need auth clarification...
+  #41 simple-task         ● running   Add fibonacci function...
+  #40 code-review-loop    ✓ complete  Fix the bug in...
 
-[n] new run  [enter] view  [x] kill  [r] refresh  [q] quit
+[enter] view  [c] continue  [x] kill  [d] delete  [r] refresh  [q] quit
 ```
 
 | View | Key | Action |
 |------|-----|--------|
 | Run List | `enter` | View run details |
+| Run List | `c` | Continue waiting run |
 | Run List | `x` | Kill run |
+| Run List | `d` | Delete run |
 | Run List | `r` | Refresh |
 | Run Detail | `↑/↓` | Select execution |
 | Run Detail | `enter` | Resume session in Claude |
+| Run Detail | `c` | Continue (if waiting) |
+| Run Detail | `s` | Stop (if waiting) |
+| Run Detail | `o` | View output |
 | All | `q` / `esc` | Quit / Back |
+
+## Human Interaction
+
+Workflows can pause for human input:
+
+**Agent escalation** - Agent returns `NEEDS_HUMAN` when stuck:
+```json
+{"status": "NEEDS_HUMAN", "reason": "Need clarification on auth approach"}
+```
+
+**Explicit checkpoint** - Script calls `pause()`:
+```lua
+local ok = pause("Approve deployment to production?")
+if not ok.continue then
+  return stuck(ok.reason)
+end
+```
+
+When paused, use:
+```bash
+shop continue 42   # Open Claude session to help agent
+# ... interact with agent ...
+shop resume 42     # Continue workflow after agent is ready
+```
 
 ## Data
 

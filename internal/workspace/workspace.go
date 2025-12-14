@@ -143,6 +143,21 @@ func (w *Workspace) ReadSignal(agentName string) (map[string]any, error) {
 	return signal, nil
 }
 
+func (w *Workspace) WriteSignal(agentName string, signal map[string]any) error {
+	path := filepath.Join(w.RepoPath, ".agents", "signals", agentName+".json")
+
+	data, err := json.MarshalIndent(signal, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to marshal signal: %w", err)
+	}
+
+	if err := os.WriteFile(path, data, 0644); err != nil {
+		return fmt.Errorf("failed to write signal file: %w", err)
+	}
+
+	return nil
+}
+
 func (w *Workspace) CreateAgentScratchpad(agentName string) error {
 	path := filepath.Join(w.RepoPath, ".agents", "scratchpad", agentName)
 	return os.MkdirAll(path, 0755)

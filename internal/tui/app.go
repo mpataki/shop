@@ -126,6 +126,14 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return a, a.loadRuns
 
+	case runStoppedMsg:
+		a.err = msg.err
+		// Reload run detail if we're viewing it
+		if a.view == ViewRunDetail && a.selectedRun != nil {
+			return a, a.loadRunDetail(a.selectedRun.ID)
+		}
+		return a, a.loadRuns
+
 	case outputLoadedMsg:
 		if msg.err != nil {
 			a.err = msg.err
@@ -188,6 +196,15 @@ func (a *App) handleRunListKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if len(a.runs) > 0 && a.selectedIdx < len(a.runs) {
 			return a, a.deleteRun(a.runs[a.selectedIdx].ID)
 		}
+
+	case "c":
+		if len(a.runs) > 0 && a.selectedIdx < len(a.runs) {
+			run := a.runs[a.selectedIdx]
+			if run.Status == models.RunStatusWaitingHuman && run.WaitingSessionID != "" {
+				workDir := run.WorkspacePath + "/repo"
+				return a, a.continueSession(run.WaitingSessionID, workDir)
+			}
+		}
 	}
 
 	return a, nil
@@ -229,6 +246,19 @@ func (a *App) handleRunDetailKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if exec.ClaudeSessionID != "" && a.selectedRun != nil {
 				return a, a.loadOutput(exec.ClaudeSessionID, a.selectedRun.WorkspacePath)
 			}
+		}
+
+	case "c":
+		if a.selectedRun != nil && a.selectedRun.Status == models.RunStatusWaitingHuman {
+			if a.selectedRun.WaitingSessionID != "" {
+				workDir := a.selectedRun.WorkspacePath + "/repo"
+				return a, a.continueSession(a.selectedRun.WaitingSessionID, workDir)
+			}
+		}
+
+	case "s":
+		if a.selectedRun != nil && a.selectedRun.Status == models.RunStatusWaitingHuman {
+			return a, a.stopRun(a.selectedRun.ID)
 		}
 	}
 
@@ -291,12 +321,14 @@ var (
 	statusFailed   = lipgloss.NewStyle().Foreground(lipgloss.Color("196"))
 	statusStuck    = lipgloss.NewStyle().Foreground(lipgloss.Color("208"))
 	statusPending  = lipgloss.NewStyle().Foreground(lipgloss.Color("243"))
+	statusWaiting  = lipgloss.NewStyle().Foreground(lipgloss.Color("141")) // purple for waiting
 
 	// Signal status colors
-	signalApproved = lipgloss.NewStyle().Foreground(lipgloss.Color("46"))  // green
-	signalDone     = lipgloss.NewStyle().Foreground(lipgloss.Color("46"))  // green
-	signalChanges  = lipgloss.NewStyle().Foreground(lipgloss.Color("220")) // yellow
-	signalBlocked  = lipgloss.NewStyle().Foreground(lipgloss.Color("196")) // red
+	signalApproved   = lipgloss.NewStyle().Foreground(lipgloss.Color("46"))  // green
+	signalDone       = lipgloss.NewStyle().Foreground(lipgloss.Color("46"))  // green
+	signalChanges    = lipgloss.NewStyle().Foreground(lipgloss.Color("220")) // yellow
+	signalBlocked    = lipgloss.NewStyle().Foreground(lipgloss.Color("196")) // red
+	signalNeedsHuman = lipgloss.NewStyle().Foreground(lipgloss.Color("141")) // purple
 
 	helpStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("241"))
@@ -321,11 +353,13 @@ func (a *App) viewRunList() string {
 		for i, run := range a.runs {
 			line := a.formatRunLine(run)
 			isSelected := i == a.selectedIdx
-			isRunning := run.Status == models.RunStatusRunning
+			isActive := run.Status == models.RunStatusRunning ||
+				run.Status == models.RunStatusWaitingHuman ||
+				run.Status == models.RunStatusStuck
 
 			if isSelected {
 				line = selectedStyle.Render("▶ " + line)
-			} else if !isRunning && run.Status != models.RunStatusStuck {
+			} else if !isActive {
 				// Dim completed/failed runs
 				line = "  " + dimStyle.Render(line)
 			} else {
@@ -335,7 +369,7 @@ func (a *App) viewRunList() string {
 		}
 	}
 
-	s += "\n" + helpStyle.Render("[enter] view  [x] kill  [d] delete  [r] refresh  [q] quit")
+	s += "\n" + helpStyle.Render("[enter] view  [c] continue  [x] kill  [d] delete  [r] refresh  [q] quit")
 
 	return s
 }
@@ -372,6 +406,8 @@ func (a *App) formatStatus(status models.RunStatus) string {
 		return statusFailed.Render("✗ failed")
 	case models.RunStatusStuck:
 		return statusStuck.Render("⚠ stuck")
+	case models.RunStatusWaitingHuman:
+		return statusWaiting.Render("⏸ waiting")
 	default:
 		return string(status)
 	}
@@ -392,7 +428,21 @@ func (a *App) viewRunDetail() string {
 	s += run.InitialPrompt + "\n\n"
 
 	// Workspace path
-	s += labelStyle.Render("Workspace: ") + dimStyle.Render(run.WorkspacePath) + "\n\n"
+	s += labelStyle.Render("Workspace: ") + dimStyle.Render(run.WorkspacePath) + "\n"
+
+	// Show waiting information for waiting_human status
+	if run.Status == models.RunStatusWaitingHuman {
+		s += "\n"
+		if run.CurrentAgent != "" {
+			s += labelStyle.Render("Agent: ") + run.CurrentAgent + "\n"
+		}
+		if run.WaitingReason != "" {
+			s += labelStyle.Render("Reason: ") + statusWaiting.Render(run.WaitingReason) + "\n"
+		}
+		s += "\n"
+	} else {
+		s += "\n"
+	}
 
 	s += "Executions\n"
 	s += "──────────\n"
@@ -409,6 +459,8 @@ func (a *App) viewRunDetail() string {
 				status = statusRunning.Render("●")
 			case models.ExecStatusFailed:
 				status = statusFailed.Render("✗")
+			case models.ExecStatusWaitingHuman:
+				status = statusWaiting.Render("⏸")
 			}
 
 			// Exit code
@@ -460,19 +512,26 @@ func (a *App) viewRunDetail() string {
 		}
 	}
 
-	s += "\n" + helpStyle.Render("[↑/↓] select  [enter] resume  [o] output  [esc] back  [q] quit")
+	// Show appropriate help based on run status
+	if run.Status == models.RunStatusWaitingHuman {
+		s += "\n" + helpStyle.Render("[c] continue  [s] stop  [↑/↓] select  [o] output  [esc] back  [q] quit")
+	} else {
+		s += "\n" + helpStyle.Render("[↑/↓] select  [enter] resume  [o] output  [esc] back  [q] quit")
+	}
 
 	return s
 }
 
 func (a *App) formatSignalStatus(status string) string {
 	switch status {
-	case "APPROVED", "DONE":
+	case "APPROVED", "DONE", "CONTINUE":
 		return signalApproved.Render(status)
 	case "CHANGES_REQUESTED":
 		return signalChanges.Render(status)
-	case "BLOCKED":
+	case "BLOCKED", "STOP":
 		return signalBlocked.Render(status)
+	case "NEEDS_HUMAN":
+		return signalNeedsHuman.Render(status)
 	default:
 		return status
 	}
@@ -532,6 +591,11 @@ type runDeletedMsg struct {
 	err   error
 }
 
+type runStoppedMsg struct {
+	runID int64
+	err   error
+}
+
 type outputLoadedMsg struct {
 	content string
 	err     error
@@ -574,7 +638,24 @@ func (a *App) deleteRun(id int64) tea.Cmd {
 	}
 }
 
+func (a *App) stopRun(id int64) tea.Cmd {
+	return func() tea.Msg {
+		if err := a.orchestrator.StopRun(id, "Stopped from TUI"); err != nil {
+			return runStoppedMsg{err: err}
+		}
+		return runStoppedMsg{runID: id}
+	}
+}
+
 func (a *App) resumeSession(sessionID string, workDir string) tea.Cmd {
+	cmd := exec.Command("claude", "--resume", sessionID)
+	cmd.Dir = workDir
+	return tea.ExecProcess(cmd, func(err error) tea.Msg {
+		return sessionResumedMsg{sessionID: sessionID, err: err}
+	})
+}
+
+func (a *App) continueSession(sessionID string, workDir string) tea.Cmd {
 	cmd := exec.Command("claude", "--resume", sessionID)
 	cmd.Dir = workDir
 	return tea.ExecProcess(cmd, func(err error) tea.Msg {

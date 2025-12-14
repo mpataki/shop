@@ -3,13 +3,16 @@ package main
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/mpataki/shop/internal/config"
 	shopLua "github.com/mpataki/shop/internal/lua"
+	"github.com/mpataki/shop/internal/models"
 	"github.com/mpataki/shop/internal/orchestrator"
 	"github.com/mpataki/shop/internal/storage"
 	"github.com/mpataki/shop/internal/tui"
@@ -30,6 +33,8 @@ func main() {
 	rootCmd.AddCommand(newListCommand())
 	rootCmd.AddCommand(newKillCommand())
 	rootCmd.AddCommand(newDeleteCommand())
+	rootCmd.AddCommand(newContinueCommand())
+	rootCmd.AddCommand(newStopCommand())
 
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)
@@ -267,8 +272,21 @@ func newStatusCommand() *cobra.Command {
 				fmt.Printf("Spec: %s\n", run.SpecPath)
 			}
 			if run.CurrentAgent != "" {
-				fmt.Printf("Current Agent: %s\n", run.CurrentAgent)
+				fmt.Printf("Agent: %s\n", run.CurrentAgent)
 			}
+
+			// Show waiting information for waiting_human status
+			if run.Status == models.RunStatusWaitingHuman {
+				if run.WaitingSessionID != "" {
+					fmt.Printf("Session: %s\n", run.WaitingSessionID)
+				}
+				if run.WaitingReason != "" {
+					fmt.Printf("Reason: %s\n", run.WaitingReason)
+				}
+				fmt.Printf("Waiting since: %s\n", formatTimeAgo(run.CreatedAt))
+				fmt.Printf("\nUse 'shop continue %d' to open the Claude session.\n", run.ID)
+			}
+
 			if run.Error != "" {
 				fmt.Printf("Error: %s\n", run.Error)
 			}
@@ -300,7 +318,7 @@ func newStatusCommand() *cobra.Command {
 }
 
 func newListCommand() *cobra.Command {
-	return &cobra.Command{
+	cmd := &cobra.Command{
 		Use:   "list",
 		Short: "List recent runs",
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -319,6 +337,8 @@ func newListCommand() *cobra.Command {
 			}
 			defer store.Close()
 
+			active, _ := cmd.Flags().GetBool("active")
+
 			runs, err := store.ListRuns(20)
 			if err != nil {
 				return err
@@ -329,15 +349,49 @@ func newListCommand() *cobra.Command {
 				return nil
 			}
 
+			// Filter to active runs if requested
+			if active {
+				var activeRuns []*models.Run
+				for _, run := range runs {
+					if run.Status == models.RunStatusRunning ||
+						run.Status == models.RunStatusWaitingHuman ||
+						run.Status == models.RunStatusPending {
+						activeRuns = append(activeRuns, run)
+					}
+				}
+				runs = activeRuns
+			}
+
+			if len(runs) == 0 {
+				fmt.Println("No active runs found.")
+				return nil
+			}
+
+			// Print header
+			fmt.Printf("%-4s %-15s %-14s %-12s %s\n", "ID", "SPEC", "STATUS", "AGENT", "WAITING FOR")
+
 			for _, run := range runs {
-				fmt.Printf("#%d %s [%s] %s\n",
-					run.ID, run.SpecName, run.Status,
-					truncate(run.InitialPrompt, 50))
+				status := string(run.Status)
+				agent := run.CurrentAgent
+				if agent == "" {
+					agent = "-"
+				}
+
+				waitingFor := "-"
+				if run.Status == models.RunStatusWaitingHuman && run.WaitingReason != "" {
+					waitingFor = truncate(run.WaitingReason, 40)
+				}
+
+				fmt.Printf("%-4d %-15s %-14s %-12s %s\n",
+					run.ID, truncate(run.SpecName, 15), status, truncate(agent, 12), waitingFor)
 			}
 
 			return nil
 		},
 	}
+
+	cmd.Flags().Bool("active", false, "Show only active runs (exclude completed/failed)")
+	return cmd
 }
 
 func newKillCommand() *cobra.Command {
@@ -421,4 +475,118 @@ func truncate(s string, maxLen int) string {
 		return s
 	}
 	return s[:maxLen-3] + "..."
+}
+
+func formatTimeAgo(t time.Time) string {
+	return storage.FormatTimeAgo(t)
+}
+
+func newContinueCommand() *cobra.Command {
+	return &cobra.Command{
+		Use:   "continue <run-id>",
+		Short: "Open Claude session for a waiting run",
+		Long:  "Resume interaction with an agent that needs human input",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			runID, err := strconv.ParseInt(args[0], 10, 64)
+			if err != nil {
+				return fmt.Errorf("invalid run ID: %w", err)
+			}
+
+			cfg, err := config.New()
+			if err != nil {
+				return err
+			}
+
+			if err := cfg.EnsureDataDir(); err != nil {
+				return err
+			}
+
+			store, err := storage.New(cfg.DBPath)
+			if err != nil {
+				return err
+			}
+			defer store.Close()
+
+			orch := orchestrator.New(store, cfg.WorkspacesDir())
+
+			// Get run details to show context
+			run, err := orch.GetRun(runID)
+			if err != nil {
+				return fmt.Errorf("failed to get run: %w", err)
+			}
+
+			sessionID, workDir, err := orch.ContinueRun(runID)
+			if err != nil {
+				return err
+			}
+
+			fmt.Printf("Opening Claude session for: %s\n", run.CurrentAgent)
+			fmt.Printf("Reason: %s\n\n", run.WaitingReason)
+
+			// Resume the Claude session
+			claudeCmd := exec.Command("claude", "--resume", sessionID)
+			claudeCmd.Dir = workDir
+			claudeCmd.Stdin = os.Stdin
+			claudeCmd.Stdout = os.Stdout
+			claudeCmd.Stderr = os.Stderr
+
+			if err := claudeCmd.Run(); err != nil {
+				return fmt.Errorf("claude session failed: %w", err)
+			}
+
+			fmt.Println("\nClaude session ended.")
+			fmt.Println("Run 'shop resume " + args[0] + "' to continue the workflow.")
+
+			return nil
+		},
+	}
+}
+
+func newStopCommand() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "stop <run-id>",
+		Short: "Stop a waiting run",
+		Long:  "Mark a waiting run as stuck and stop waiting for human input",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			runID, err := strconv.ParseInt(args[0], 10, 64)
+			if err != nil {
+				return fmt.Errorf("invalid run ID: %w", err)
+			}
+
+			reason, _ := cmd.Flags().GetString("reason")
+
+			cfg, err := config.New()
+			if err != nil {
+				return err
+			}
+
+			if err := cfg.EnsureDataDir(); err != nil {
+				return err
+			}
+
+			store, err := storage.New(cfg.DBPath)
+			if err != nil {
+				return err
+			}
+			defer store.Close()
+
+			orch := orchestrator.New(store, cfg.WorkspacesDir())
+
+			if err := orch.StopRun(runID, reason); err != nil {
+				return fmt.Errorf("failed to stop run: %w", err)
+			}
+
+			if reason != "" {
+				fmt.Printf("Run %d marked as stuck: %s\n", runID, reason)
+			} else {
+				fmt.Printf("Run %d marked as stuck\n", runID)
+			}
+			return nil
+		},
+	}
+
+	cmd.Flags().String("reason", "", "Reason for stopping the run")
+	return cmd
 }

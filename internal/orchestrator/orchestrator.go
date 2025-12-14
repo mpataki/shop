@@ -85,8 +85,13 @@ func (o *Orchestrator) Execute(run *models.Run) error {
 	}
 
 	if err != nil {
-		// Mark run as failed if not already stuck
-		if run.Status != models.RunStatusStuck {
+		// Check if we're waiting for human input - this is a valid state, not a failure
+		if err == shopLua.ErrWaitingHuman {
+			return nil // Run is now in waiting_human state, not an error
+		}
+
+		// Mark run as failed if not already stuck or waiting
+		if run.Status != models.RunStatusStuck && run.Status != models.RunStatusWaitingHuman {
 			now := time.Now()
 			run.Status = models.RunStatusFailed
 			run.CompletedAt = &now
@@ -205,6 +210,69 @@ func (o *Orchestrator) DeleteRun(runID int64) error {
 
 	// Delete from database
 	return o.storage.DeleteRun(runID)
+}
+
+// ContinueRun opens a Claude session to continue a waiting run
+// It returns the session ID and working directory for the caller to launch Claude
+func (o *Orchestrator) ContinueRun(runID int64) (sessionID string, workDir string, err error) {
+	run, err := o.storage.GetRun(runID)
+	if err != nil {
+		return "", "", fmt.Errorf("failed to get run: %w", err)
+	}
+
+	if run.Status != models.RunStatusWaitingHuman {
+		return "", "", fmt.Errorf("run %d is not waiting for human input (status: %s)", runID, run.Status)
+	}
+
+	if run.WaitingSessionID == "" {
+		return "", "", fmt.Errorf("run %d has no session ID to resume", runID)
+	}
+
+	workDir = filepath.Join(run.WorkspacePath, "repo")
+	return run.WaitingSessionID, workDir, nil
+}
+
+// StopRun marks a waiting run as stuck
+func (o *Orchestrator) StopRun(runID int64, reason string) error {
+	run, err := o.storage.GetRun(runID)
+	if err != nil {
+		return fmt.Errorf("failed to get run: %w", err)
+	}
+
+	if run.Status != models.RunStatusWaitingHuman {
+		return fmt.Errorf("run %d is not waiting for human input (status: %s)", runID, run.Status)
+	}
+
+	// Update the waiting execution to failed
+	exec, err := o.storage.GetWaitingExecutionForRun(runID)
+	if err != nil {
+		return fmt.Errorf("failed to get waiting execution: %w", err)
+	}
+	if exec != nil {
+		now := time.Now()
+		exec.Status = models.ExecStatusFailed
+		exec.CompletedAt = &now
+		o.storage.UpdateExecution(exec)
+	}
+
+	// Mark run as stuck
+	now := time.Now()
+	run.Status = models.RunStatusStuck
+	run.CompletedAt = &now
+	if reason != "" {
+		run.Error = reason
+	} else {
+		run.Error = "Stopped by user"
+	}
+	run.WaitingReason = ""
+	run.WaitingSessionID = ""
+
+	return o.storage.UpdateRun(run)
+}
+
+// ListWaitingRuns returns runs that are waiting for human input
+func (o *Orchestrator) ListWaitingRuns() ([]*models.Run, error) {
+	return o.storage.ListWaitingRuns()
 }
 
 // findSourceRepo extracts the main repo path from a worktree's .git file

@@ -2,20 +2,20 @@
 
 ## What This Is
 
-Shop orchestrates multiple Claude Code agents through Lua workflow scripts. It runs agents in sequence, handles their outputs (signals), and supports crash recovery via SQLite persistence.
+Shop orchestrates multiple Claude Code agents through Lua workflow scripts. It runs agents in sequence, handles their outputs (signals), supports crash recovery via SQLite persistence, and enables human-in-the-loop workflows.
 
 ## Architecture Overview
 
 ```
-cmd/shop/main.go          CLI entry point (run, resume, status, list, kill, delete)
+cmd/shop/main.go          CLI entry point (run, resume, status, list, kill, delete, continue, stop)
 internal/
   config/config.go        Paths: ~/.shop/shop.db, .shop/specs/, ~/.shop/specs/
   storage/sqlite.go       SQLite schema and CRUD for runs/executions
-  models/run.go           Run struct (ID, Status, SpecPath, Error, etc.)
+  models/run.go           Run struct (ID, Status, SpecPath, Error, WaitingReason, etc.)
   models/execution.go     Execution struct (AgentName, CallIndex, OutputSignal, etc.)
-  orchestrator/           StartRun, Execute, Resume, KillRun, DeleteRun
-  lua/runtime.go          Sandboxed Lua VM with run(), stuck(), context(), log()
-  workspace/workspace.go  Git worktree creation, signal file reading
+  orchestrator/           StartRun, Execute, Resume, KillRun, DeleteRun, ContinueRun, StopRun
+  lua/runtime.go          Sandboxed Lua VM with run(), stuck(), pause(), context(), log()
+  workspace/workspace.go  Git worktree creation, signal file reading/writing
   tui/app.go              Bubbletea TUI for viewing runs
 ```
 
@@ -33,14 +33,21 @@ function workflow(prompt)
     if code.status == "BLOCKED" then
       return stuck(code.reason)  -- stuck() marks run as blocked
     end
+    -- If agent returns NEEDS_HUMAN, workflow pauses for human input
 
     local review = run("reviewer")
     if review.status == "APPROVED" then
-      return  -- normal return = success
+      break
     end
   end
 
-  stuck("max iterations")
+  -- Explicit checkpoint for human approval
+  local ok = pause("Approve deployment?")
+  if not ok.continue then
+    return stuck(ok.reason)
+  end
+
+  run("deployer")
 end
 ```
 
@@ -61,11 +68,11 @@ Agents must exist as `.claude/agents/{name}.md` in the workspace and must write 
 ## Database Schema
 
 ```sql
-runs (id, status, spec_path, initial_prompt, workspace_path, current_agent, error, ...)
+runs (id, status, spec_path, initial_prompt, workspace_path, current_agent, error, waiting_reason, waiting_session_id, ...)
 executions (id, run_id, call_index, agent_name, status, output_signal, session_id, pid, ...)
 ```
 
-Run statuses: `pending`, `running`, `complete`, `failed`, `stuck`
+Run statuses: `pending`, `running`, `complete`, `failed`, `stuck`, `waiting_human`
 
 ## CLI Commands
 
@@ -74,19 +81,39 @@ shop run <spec> <prompt>   # Start workflow
 shop resume <run-id>       # Resume from last successful call_index
 shop status <run-id>       # Show run details
 shop list                  # List recent runs
+shop list --active         # List only active runs (running, waiting, pending)
 shop kill <run-id>         # Kill running process
 shop delete <run-id>       # Remove run and workspace
+shop continue <run-id>     # Open Claude session for waiting run
+shop stop <run-id>         # Stop a waiting run
 shop                       # Launch TUI
 ```
 
 ## Lua API (available in workflow scripts)
 
 - `run(agent, prompt?)` → signal table with `status`, `_session_id`, etc.
+  - If agent returns `{status: "NEEDS_HUMAN", reason: "..."}`, workflow pauses for human input
+- `pause(message)` → pause for human approval, returns `{continue: bool, reason: string, message: string}`
 - `stuck(reason?)` → terminate workflow as stuck
 - `context()` → `{run_id, repo, iteration, prompt}`
 - `log(message)` → write to run log
 
 Sandbox removes: `os`, `io`, `debug`, `math.random`, `load*` functions
+
+## Human Interaction
+
+Workflows can pause for human input in two ways:
+
+1. **Agent escalation**: Agent returns `{status: "NEEDS_HUMAN", reason: "..."}` signal
+2. **Explicit checkpoint**: Script calls `pause("message")`
+
+When paused:
+- Run status becomes `waiting_human`
+- Human uses `shop continue <id>` to open Claude session
+- Human interacts with agent, agent writes new signal
+- Human exits, uses `shop resume <id>` to continue workflow
+
+See `specs/human-interaction.md` for full specification.
 
 ## File Locations
 

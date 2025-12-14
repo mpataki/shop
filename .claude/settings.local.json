@@ -12,7 +12,8 @@
       "Bash(./shop status:*)",
       "Bash(find:*)",
       "Bash(grep:*)",
-      "Bash(git -C /Users/mat/code/shop log --oneline)"
+      "Bash(git -C /Users/mat/code/shop log --oneline)",
+      "Bash(./shop list:*)"
     ]
   },
   "enableAllProjectMcpServers": true,

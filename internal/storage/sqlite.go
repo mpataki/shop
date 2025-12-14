@@ -80,14 +80,19 @@ func (s *Storage) migrate() error {
 	// Create index for Lua call_index lookups
 	s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_executions_call_index ON executions(run_id, call_index)`)
 
+	// Migration: add human interaction columns
+	s.db.Exec(`ALTER TABLE runs ADD COLUMN waiting_reason TEXT`)
+	s.db.Exec(`ALTER TABLE runs ADD COLUMN waiting_session_id TEXT`)
+
 	return nil
 }
 
 func (s *Storage) CreateRun(run *models.Run) (int64, error) {
 	result, err := s.db.Exec(
-		`INSERT INTO runs (initial_prompt, spec_name, workspace_path, status, current_agent, spec_path, error)
-		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO runs (initial_prompt, spec_name, workspace_path, status, current_agent, spec_path, error, waiting_reason, waiting_session_id)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		run.InitialPrompt, run.SpecName, run.WorkspacePath, run.Status, run.CurrentAgent, run.SpecPath, run.Error,
+		run.WaitingReason, run.WaitingSessionID,
 	)
 	if err != nil {
 		return 0, err
@@ -97,17 +102,18 @@ func (s *Storage) CreateRun(run *models.Run) (int64, error) {
 
 func (s *Storage) GetRun(id int64) (*models.Run, error) {
 	row := s.db.QueryRow(
-		`SELECT id, created_at, completed_at, initial_prompt, spec_name, workspace_path, status, current_agent, spec_path, error
+		`SELECT id, created_at, completed_at, initial_prompt, spec_name, workspace_path, status, current_agent, spec_path, error, waiting_reason, waiting_session_id
 		 FROM runs WHERE id = ?`, id,
 	)
 
 	var run models.Run
 	var completedAt sql.NullTime
-	var currentAgent, specPath, runError sql.NullString
+	var currentAgent, specPath, runError, waitingReason, waitingSessionID sql.NullString
 
 	err := row.Scan(
 		&run.ID, &run.CreatedAt, &completedAt, &run.InitialPrompt,
 		&run.SpecName, &run.WorkspacePath, &run.Status, &currentAgent, &specPath, &runError,
+		&waitingReason, &waitingSessionID,
 	)
 	if err != nil {
 		return nil, err
@@ -125,21 +131,27 @@ func (s *Storage) GetRun(id int64) (*models.Run, error) {
 	if runError.Valid {
 		run.Error = runError.String
 	}
+	if waitingReason.Valid {
+		run.WaitingReason = waitingReason.String
+	}
+	if waitingSessionID.Valid {
+		run.WaitingSessionID = waitingSessionID.String
+	}
 
 	return &run, nil
 }
 
 func (s *Storage) UpdateRun(run *models.Run) error {
 	_, err := s.db.Exec(
-		`UPDATE runs SET completed_at = ?, status = ?, current_agent = ?, workspace_path = ?, spec_path = ?, error = ? WHERE id = ?`,
-		run.CompletedAt, run.Status, run.CurrentAgent, run.WorkspacePath, run.SpecPath, run.Error, run.ID,
+		`UPDATE runs SET completed_at = ?, status = ?, current_agent = ?, workspace_path = ?, spec_path = ?, error = ?, waiting_reason = ?, waiting_session_id = ? WHERE id = ?`,
+		run.CompletedAt, run.Status, run.CurrentAgent, run.WorkspacePath, run.SpecPath, run.Error, run.WaitingReason, run.WaitingSessionID, run.ID,
 	)
 	return err
 }
 
 func (s *Storage) ListRuns(limit int) ([]*models.Run, error) {
 	rows, err := s.db.Query(
-		`SELECT id, created_at, completed_at, initial_prompt, spec_name, workspace_path, status, current_agent, spec_path, error
+		`SELECT id, created_at, completed_at, initial_prompt, spec_name, workspace_path, status, current_agent, spec_path, error, waiting_reason, waiting_session_id
 		 FROM runs ORDER BY created_at DESC LIMIT ?`, limit,
 	)
 	if err != nil {
@@ -151,11 +163,12 @@ func (s *Storage) ListRuns(limit int) ([]*models.Run, error) {
 	for rows.Next() {
 		var run models.Run
 		var completedAt sql.NullTime
-		var currentAgent, specPath, runError sql.NullString
+		var currentAgent, specPath, runError, waitingReason, waitingSessionID sql.NullString
 
 		err := rows.Scan(
 			&run.ID, &run.CreatedAt, &completedAt, &run.InitialPrompt,
 			&run.SpecName, &run.WorkspacePath, &run.Status, &currentAgent, &specPath, &runError,
+			&waitingReason, &waitingSessionID,
 		)
 		if err != nil {
 			return nil, err
@@ -172,6 +185,12 @@ func (s *Storage) ListRuns(limit int) ([]*models.Run, error) {
 		}
 		if runError.Valid {
 			run.Error = runError.String
+		}
+		if waitingReason.Valid {
+			run.WaitingReason = waitingReason.String
+		}
+		if waitingSessionID.Valid {
+			run.WaitingSessionID = waitingSessionID.String
 		}
 
 		runs = append(runs, &run)
@@ -396,4 +415,70 @@ func (s *Storage) InvalidateExecutionsAfterIndex(runID int64, callIndex int) err
 		models.ExecStatusFailed, runID, callIndex,
 	)
 	return err
+}
+
+// GetWaitingExecutionForRun returns the execution that is waiting for human input
+func (s *Storage) GetWaitingExecutionForRun(runID int64) (*models.Execution, error) {
+	execs, err := s.GetExecutionsForRun(runID)
+	if err != nil {
+		return nil, err
+	}
+	for _, exec := range execs {
+		if exec.Status == models.ExecStatusWaitingHuman {
+			return exec, nil
+		}
+	}
+	return nil, nil
+}
+
+// ListWaitingRuns returns runs that are waiting for human input
+func (s *Storage) ListWaitingRuns() ([]*models.Run, error) {
+	rows, err := s.db.Query(
+		`SELECT id, created_at, completed_at, initial_prompt, spec_name, workspace_path, status, current_agent, spec_path, error, waiting_reason, waiting_session_id
+		 FROM runs WHERE status = ? ORDER BY created_at DESC`,
+		models.RunStatusWaitingHuman,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var runs []*models.Run
+	for rows.Next() {
+		var run models.Run
+		var completedAt sql.NullTime
+		var currentAgent, specPath, runError, waitingReason, waitingSessionID sql.NullString
+
+		err := rows.Scan(
+			&run.ID, &run.CreatedAt, &completedAt, &run.InitialPrompt,
+			&run.SpecName, &run.WorkspacePath, &run.Status, &currentAgent, &specPath, &runError,
+			&waitingReason, &waitingSessionID,
+		)
+		if err != nil {
+			return nil, err
+		}
+
+		if completedAt.Valid {
+			run.CompletedAt = &completedAt.Time
+		}
+		if currentAgent.Valid {
+			run.CurrentAgent = currentAgent.String
+		}
+		if specPath.Valid {
+			run.SpecPath = specPath.String
+		}
+		if runError.Valid {
+			run.Error = runError.String
+		}
+		if waitingReason.Valid {
+			run.WaitingReason = waitingReason.String
+		}
+		if waitingSessionID.Valid {
+			run.WaitingSessionID = waitingSessionID.String
+		}
+
+		runs = append(runs, &run)
+	}
+
+	return runs, rows.Err()
 }

@@ -5,10 +5,11 @@ import "time"
 type ExecStatus string
 
 const (
-	ExecStatusPending  ExecStatus = "pending"
-	ExecStatusRunning  ExecStatus = "running"
-	ExecStatusComplete ExecStatus = "complete"
-	ExecStatusFailed   ExecStatus = "failed"
+	ExecStatusPending      ExecStatus = "pending"
+	ExecStatusRunning      ExecStatus = "running"
+	ExecStatusComplete     ExecStatus = "complete"
+	ExecStatusFailed       ExecStatus = "failed"
+	ExecStatusWaitingHuman ExecStatus = "waiting_human"
 )
 
 type Execution struct {
