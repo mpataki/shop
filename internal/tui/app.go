@@ -213,10 +213,18 @@ func (a *App) handleRunListKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			a.selectedIdx++
 		}
 
-	case "enter":
+	case "enter", "l":
 		if len(a.runs) > 0 && a.selectedIdx < len(a.runs) {
 			return a, a.loadRunDetail(a.runs[a.selectedIdx].ID)
 		}
+
+	case "G":
+		if len(a.runs) > 0 {
+			a.selectedIdx = len(a.runs) - 1
+		}
+
+	case "g":
+		a.selectedIdx = 0
 
 	case "n":
 		return a, a.enterNewRunView()
@@ -249,7 +257,7 @@ func (a *App) handleRunListKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 func (a *App) handleRunDetailKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
-	case "q", "esc":
+	case "q", "esc", "h":
 		a.view = ViewRunList
 		a.selectedRun = nil
 		a.executions = nil
@@ -268,7 +276,15 @@ func (a *App) handleRunDetailKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			a.selectedExecIdx++
 		}
 
-	case "enter":
+	case "G":
+		if len(a.executions) > 0 {
+			a.selectedExecIdx = len(a.executions) - 1
+		}
+
+	case "g":
+		a.selectedExecIdx = 0
+
+	case "enter", "l":
 		if len(a.executions) > 0 && a.selectedExecIdx < len(a.executions) {
 			exec := a.executions[a.selectedExecIdx]
 			if exec.ClaudeSessionID != "" && a.selectedRun != nil {
@@ -304,7 +320,7 @@ func (a *App) handleRunDetailKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 func (a *App) handleOutputKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
-	case "q", "esc":
+	case "q", "esc", "h":
 		a.view = ViewRunDetail
 		a.outputContent = ""
 
@@ -453,7 +469,7 @@ func (a *App) viewRunList() string {
 		}
 	}
 
-	s += "\n" + helpStyle.Render("[enter] view  [c] continue  [x] kill  [d] delete  [r] refresh  [q] quit")
+	s += "\n" + helpStyle.Render("[j/k] navigate  [l/enter] view  [c] continue  [x] kill  [d] delete  [r] refresh  [q] quit")
 
 	return s
 }
@@ -598,9 +614,9 @@ func (a *App) viewRunDetail() string {
 
 	// Show appropriate help based on run status
 	if run.Status == models.RunStatusWaitingHuman {
-		s += "\n" + helpStyle.Render("[c] continue  [s] stop  [↑/↓] select  [o] output  [esc] back  [q] quit")
+		s += "\n" + helpStyle.Render("[j/k] navigate  [c] continue  [s] stop  [o] output  [h] back  [q] quit")
 	} else {
-		s += "\n" + helpStyle.Render("[↑/↓] select  [enter] resume  [o] output  [esc] back  [q] quit")
+		s += "\n" + helpStyle.Render("[j/k] navigate  [l/enter] resume  [o] output  [h] back  [q] quit")
 	}
 
 	return s
