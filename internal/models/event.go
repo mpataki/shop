@@ -4,6 +4,7 @@ type EventType int
 
 const (
 	EventRunStatusChanged EventType = iota
+	EventRunDeleted
 	EventAgentStarted
 	EventAgentCompleted
 )

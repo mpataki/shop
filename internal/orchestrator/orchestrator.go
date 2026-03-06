@@ -139,6 +139,7 @@ func (o *Orchestrator) Resume(runID int64) error {
 	if err := o.storage.UpdateRun(run); err != nil {
 		return err
 	}
+	o.emit(models.Event{Type: models.EventRunStatusChanged, RunID: run.ID, Status: models.RunStatusRunning})
 
 	return o.Execute(run)
 }
@@ -235,7 +236,11 @@ func (o *Orchestrator) DeleteRun(runID int64) error {
 	}
 
 	// Delete from database
-	return o.storage.DeleteRun(runID)
+	if err := o.storage.DeleteRun(runID); err != nil {
+		return err
+	}
+	o.emit(models.Event{Type: models.EventRunDeleted, RunID: runID})
+	return nil
 }
 
 // ContinueRun opens a Claude session to continue a waiting run

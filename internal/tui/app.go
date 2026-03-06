@@ -97,12 +97,23 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		var cmds []tea.Cmd
 		cmds = append(cmds, a.waitForEvent()) // re-subscribe for next event
 
-		switch a.view {
-		case ViewRunList:
+		switch event.Type {
+		case models.EventRunDeleted:
+			// If viewing the deleted run, go back to list
+			if a.view == ViewRunDetail && a.selectedRun != nil && event.RunID == a.selectedRun.ID {
+				a.view = ViewRunList
+				a.selectedRun = nil
+				a.executions = nil
+			}
 			cmds = append(cmds, a.loadRuns)
-		case ViewRunDetail:
-			if a.selectedRun != nil && event.RunID == a.selectedRun.ID {
-				cmds = append(cmds, a.loadRunDetail(a.selectedRun.ID))
+		default:
+			switch a.view {
+			case ViewRunList:
+				cmds = append(cmds, a.loadRuns)
+			case ViewRunDetail:
+				if a.selectedRun != nil && event.RunID == a.selectedRun.ID {
+					cmds = append(cmds, a.loadRunDetail(a.selectedRun.ID))
+				}
 			}
 		}
 		return a, tea.Batch(cmds...)
