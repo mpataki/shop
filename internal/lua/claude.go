@@ -3,10 +3,11 @@ package lua
 import (
 	"encoding/json"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+
+	"github.com/google/uuid"
 )
 
 // runClaude executes the Claude CLI and returns the session ID and exit code.
@@ -18,11 +19,15 @@ func (r *Runtime) runClaude(claudeAgent, signalAgent, prompt string, execID int6
 		return "", 0, fmt.Errorf("failed to write MCP config: %w", err)
 	}
 
+	// Pre-generate session ID so we can resume the session while it's still running
+	sessionID = uuid.New().String()
+
 	args := []string{
 		"-p", prompt,
 		"--output-format", "json",
 		"--dangerously-skip-permissions",
 		"--max-turns", "10",
+		"--session-id", sessionID,
 	}
 
 	if claudeAgent != "" {
@@ -32,22 +37,15 @@ func (r *Runtime) runClaude(claudeAgent, signalAgent, prompt string, execID int6
 	cmd := exec.Command("claude", args...)
 	cmd.Dir = r.ws.RepoPath
 
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		return "", 0, err
-	}
-
 	if err := cmd.Start(); err != nil {
 		return "", 0, err
 	}
 
-	// Store PID
+	// Store PID and session ID immediately so TUI can resume live sessions
 	if cmd.Process != nil {
 		r.storage.UpdateExecutionPID(execID, cmd.Process.Pid)
 	}
-
-	// Read output
-	output, _ := io.ReadAll(stdout)
+	r.storage.UpdateExecutionSessionID(execID, sessionID)
 
 	// Wait for completion
 	err = cmd.Wait()
@@ -62,14 +60,6 @@ func (r *Runtime) runClaude(claudeAgent, signalAgent, prompt string, execID int6
 		} else {
 			return "", 0, err
 		}
-	}
-
-	// Parse session ID from JSON output
-	var result struct {
-		SessionID string `json:"session_id"`
-	}
-	if err := json.Unmarshal(output, &result); err == nil {
-		sessionID = result.SessionID
 	}
 
 	return sessionID, exitCode, nil

@@ -285,6 +285,11 @@ func (s *Storage) UpdateExecutionPID(execID int64, pid int) error {
 	return err
 }
 
+func (s *Storage) UpdateExecutionSessionID(execID int64, sessionID string) error {
+	_, err := s.db.Exec(`UPDATE executions SET claude_session_id = ? WHERE id = ?`, sessionID, execID)
+	return err
+}
+
 func (s *Storage) UpdateExecution(exec *models.Execution) error {
 	var signalJSON *string
 	if exec.OutputSignal != nil {
