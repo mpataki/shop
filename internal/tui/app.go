@@ -44,10 +44,13 @@ type App struct {
 	focusOnPrompt       bool
 
 	spinner spinner.Model
+	logs    []string // recent activity log (ring buffer)
 	width   int
 	height  int
 	err     error
 }
+
+const maxLogs = 6
 
 func NewApp(orch *orchestrator.Orchestrator, cfg *config.Config) *App {
 	ti := textinput.New()
@@ -106,6 +109,11 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		var cmds []tea.Cmd
 		cmds = append(cmds, a.waitForEvent())
 
+		// Append to activity log
+		if line := a.formatEventLog(event); line != "" {
+			a.appendLog(line)
+		}
+
 		switch event.Type {
 		case models.EventRunDeleted:
 			if a.view == ViewRunDetail && a.selectedRun != nil && event.RunID == a.selectedRun.ID {
@@ -114,6 +122,8 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				a.executions = nil
 			}
 			cmds = append(cmds, a.loadRuns)
+		case models.EventLogMessage:
+			// Log-only event, no data reload needed
 		default:
 			switch a.view {
 			case ViewRunList:
@@ -365,6 +375,30 @@ func (a *App) handleNewRunKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 	return a, nil
+}
+
+// ── Activity Log ──────────────────────────────────────────────────────────────
+
+func (a *App) appendLog(line string) {
+	a.logs = append(a.logs, line)
+	if len(a.logs) > maxLogs {
+		a.logs = a.logs[len(a.logs)-maxLogs:]
+	}
+}
+
+func (a *App) formatEventLog(event models.Event) string {
+	switch event.Type {
+	case models.EventAgentStarted:
+		return fmt.Sprintf("#%d %s started", event.RunID, event.Agent)
+	case models.EventAgentCompleted:
+		return fmt.Sprintf("#%d %s completed", event.RunID, event.Agent)
+	case models.EventRunStatusChanged:
+		return fmt.Sprintf("#%d → %s", event.RunID, event.Status)
+	case models.EventLogMessage:
+		return fmt.Sprintf("#%d %s", event.RunID, event.Message)
+	default:
+		return ""
+	}
 }
 
 // ── Messages ──────────────────────────────────────────────────────────────────

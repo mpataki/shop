@@ -5,6 +5,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/charmbracelet/lipgloss"
 	"github.com/mpataki/shop/internal/models"
 )
 
@@ -25,22 +26,32 @@ func (a *App) View() string {
 func (a *App) viewRunList() string {
 	var b strings.Builder
 
-	b.WriteString(titleStyle.Render("shop") + "\n")
-	b.WriteString(sepStyle.Render(sep(a.width)) + "\n\n")
+	b.WriteString(titleStyle.Render(" shop") + "\n\n")
 
 	if a.err != nil {
 		b.WriteString(errorStyle.Render("  error: "+a.err.Error()) + "\n\n")
 	}
 
+	// Runs section
+	var runsContent strings.Builder
 	if len(a.runs) == 0 {
-		b.WriteString(dimStyle.Render("  no runs yet — press n to start one") + "\n")
+		runsContent.WriteString(dimStyle.Render("no runs yet — press n to start one"))
 	} else {
 		for i, run := range a.runs {
-			b.WriteString(a.renderRunRow(i, run) + "\n")
+			if i > 0 {
+				runsContent.WriteString("\n")
+			}
+			runsContent.WriteString(a.renderRunRow(i, run))
 		}
 	}
 
-	b.WriteString("\n")
+	runsBox := boxStyle.Width(a.contentWidth()).Render(runsContent.String())
+	b.WriteString(runsBox + "\n")
+
+	// Activity log
+	b.WriteString(a.renderLogPanel())
+
+	// Help
 	b.WriteString(helpStyle.Render("  j/k ↕  l/↵ view  n new  c continue  x kill  d delete  q quit"))
 
 	return b.String()
@@ -86,41 +97,47 @@ func (a *App) viewRunDetail() string {
 	var b strings.Builder
 
 	// Header
-	b.WriteString(titleStyle.Render(fmt.Sprintf("run #%d", run.ID)) + "  " +
+	b.WriteString(titleStyle.Render(fmt.Sprintf(" run #%d", run.ID)) + "  " +
 		dimStyle.Render(run.WorkflowName) + "  " +
-		a.formatStatus(run) + "\n")
-	b.WriteString(sepStyle.Render(sep(a.width)) + "\n\n")
+		a.formatStatus(run) + "\n\n")
 
-	// Prompt
-	b.WriteString("  " + run.InitialPrompt + "\n\n")
+	// Info section
+	var infoContent strings.Builder
+	infoContent.WriteString(run.InitialPrompt + "\n\n")
+	infoContent.WriteString(labelStyle.Render("workspace  ") + dimStyle.Render(run.WorkspacePath))
 
-	// Metadata
-	b.WriteString("  " + labelStyle.Render("workspace  ") + dimStyle.Render(run.WorkspacePath) + "\n")
-
-	if run.Status == models.RunStatusWaitingHuman {
-		b.WriteString("\n")
-		if run.WaitingReason != "" {
-			b.WriteString("  " + statusWaitingStyle.Render("⏸ "+run.WaitingReason) + "\n")
-		}
+	if run.Status == models.RunStatusWaitingHuman && run.WaitingReason != "" {
+		infoContent.WriteString("\n\n" + statusWaitingStyle.Render("⏸ "+run.WaitingReason))
 	}
 
 	if run.Status == models.RunStatusFailed && run.Error != "" {
-		b.WriteString("\n  " + errorStyle.Render("✗ "+run.Error) + "\n")
+		infoContent.WriteString("\n\n" + errorStyle.Render("✗ "+run.Error))
 	}
 
-	b.WriteString("\n")
-	b.WriteString("  " + dimStyle.Render("executions") + "\n")
-	b.WriteString("  " + sepStyle.Render(sep(a.width-4)) + "\n")
+	infoBox := boxStyle.Width(a.contentWidth()).Render(infoContent.String())
+	b.WriteString(infoBox + "\n")
 
+	// Executions section
+	var execContent strings.Builder
 	if len(a.executions) == 0 {
-		b.WriteString("  " + dimStyle.Render("(none yet)") + "\n")
+		execContent.WriteString(dimStyle.Render("(none yet)"))
 	} else {
 		for i, exec := range a.executions {
-			b.WriteString(a.renderExecRow(i, exec) + "\n")
+			if i > 0 {
+				execContent.WriteString("\n")
+			}
+			execContent.WriteString(a.renderExecRow(i, exec))
 		}
 	}
 
-	b.WriteString("\n")
+	execBox := boxStyle.Width(a.contentWidth()).Render(
+		labelStyle.Render("executions") + "\n" + execContent.String())
+	b.WriteString(execBox + "\n")
+
+	// Activity log
+	b.WriteString(a.renderLogPanel())
+
+	// Help
 	if run.Status == models.RunStatusWaitingHuman {
 		b.WriteString(helpStyle.Render("  j/k ↕  c continue  s stop  o output  h/← back  q quit"))
 	} else {
@@ -140,7 +157,7 @@ func (a *App) renderExecRow(i int, exec *models.Execution) string {
 	signal := a.formatSignalStatus(exec)
 
 	if selected {
-		return cursorStyle.Render("❯ ") + "  " +
+		return cursorStyle.Render("❯ ") +
 			selectedRowStyle.Render(num) + "  " +
 			selectedRowStyle.Render(agent) + "  " +
 			status + "  " +
@@ -148,7 +165,7 @@ func (a *App) renderExecRow(i int, exec *models.Execution) string {
 			signal
 	}
 
-	return "    " + num + "  " + agent + "  " + status + "  " + padRight(duration, 8) + "  " + signal
+	return "  " + num + "  " + agent + "  " + status + "  " + padRight(duration, 8) + "  " + signal
 }
 
 func (a *App) formatExecStatus(exec *models.Execution) string {
@@ -243,50 +260,82 @@ func (a *App) formatAge(t time.Time) string {
 	}
 }
 
+func (a *App) renderLogPanel() string {
+	if len(a.logs) == 0 {
+		return "\n"
+	}
+
+	var content strings.Builder
+	for i, line := range a.logs {
+		if i > 0 {
+			content.WriteString("\n")
+		}
+		content.WriteString(logEntryStyle.Render("  " + line))
+	}
+
+	logBox := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.Color("235")).
+		Padding(0, 1).
+		Width(a.contentWidth()).
+		Render(labelStyle.Render("activity") + "\n" + content.String())
+
+	return logBox + "\n"
+}
+
 func (a *App) viewNewRun() string {
 	var b strings.Builder
 
-	b.WriteString(titleStyle.Render("new run") + "\n")
-	b.WriteString(sepStyle.Render(sep(a.width)) + "\n\n")
+	b.WriteString(titleStyle.Render(" new run") + "\n\n")
 
 	if a.err != nil {
 		b.WriteString(errorStyle.Render("  error: "+a.err.Error()) + "\n\n")
 	}
 
-	b.WriteString("  " + labelStyle.Render("workflow") + "\n\n")
-
+	// Workflow selection
+	var wfContent strings.Builder
 	if len(a.workflows) == 0 {
-		b.WriteString("  " + dimStyle.Render("no workflows found in .shop/workflows/ or ~/.shop/workflows/") + "\n")
+		wfContent.WriteString(dimStyle.Render("no workflows found in .shop/workflows/ or ~/.shop/workflows/"))
 	} else {
 		for i, wf := range a.workflows {
 			name := wf.Name
 			if wf.Source == "user" {
 				name += dimStyle.Render(" ~")
 			}
+			if i > 0 {
+				wfContent.WriteString("\n")
+			}
 			if i == a.selectedWorkflowIdx {
 				if !a.focusOnPrompt {
-					b.WriteString(cursorStyle.Render("  ❯ ") + selectedRowStyle.Render(name) + "\n")
+					wfContent.WriteString(cursorStyle.Render("❯ ") + selectedRowStyle.Render(name))
 				} else {
-					b.WriteString("  ❯ " + name + "\n")
+					wfContent.WriteString("❯ " + name)
 				}
 			} else {
-				b.WriteString("    " + dimStyle.Render(name) + "\n")
+				wfContent.WriteString("  " + dimStyle.Render(name))
 			}
 		}
 	}
 
-	b.WriteString("\n  " + labelStyle.Render("prompt") + "\n\n")
+	wfBox := boxStyle.Width(a.contentWidth()).Render(
+		labelStyle.Render("workflow") + "\n" + wfContent.String())
+	b.WriteString(wfBox + "\n")
 
+	// Prompt input
+	var promptContent string
 	if a.focusOnPrompt {
-		b.WriteString("  " + a.promptInput.View() + "\n")
+		promptContent = a.promptInput.View()
 	} else if a.promptInput.Value() == "" {
-		b.WriteString("  " + dimStyle.Render("press ↵ to enter prompt…") + "\n")
+		promptContent = dimStyle.Render("press ↵ to enter prompt…")
 	} else {
-		b.WriteString("  " + a.promptInput.Value() + "\n")
+		promptContent = a.promptInput.Value()
 	}
 
-	b.WriteString("\n")
+	promptBox := boxStyle.Width(a.contentWidth()).Render(
+		labelStyle.Render("prompt") + "\n" + promptContent)
+	b.WriteString(promptBox + "\n\n")
 
+	// Help
 	if a.focusOnPrompt {
 		b.WriteString(helpStyle.Render("  ↵ start  esc back  ctrl+c quit"))
 	} else {
@@ -299,27 +348,31 @@ func (a *App) viewNewRun() string {
 func (a *App) viewOutput() string {
 	var b strings.Builder
 
-	b.WriteString(titleStyle.Render("output") + "\n")
-	b.WriteString(sepStyle.Render(sep(a.width)) + "\n\n")
+	b.WriteString(titleStyle.Render(" output") + "\n\n")
 
+	var content string
 	if a.outputContent == "" {
-		b.WriteString(dimStyle.Render("  (no output)") + "\n")
+		content = dimStyle.Render("(no output)")
 	} else {
-		b.WriteString(a.outputContent + "\n")
+		content = a.outputContent
 	}
 
-	b.WriteString("\n" + helpStyle.Render("  esc/h back  q quit"))
+	outBox := boxStyle.Width(a.contentWidth()).Render(content)
+	b.WriteString(outBox + "\n\n")
+
+	b.WriteString(helpStyle.Render("  esc/h back  q quit"))
 
 	return b.String()
 }
 
 // helpers
 
-func sep(width int) string {
-	if width <= 0 {
-		width = 60
+func (a *App) contentWidth() int {
+	w := a.width - 2
+	if w < 40 {
+		w = 60
 	}
-	return strings.Repeat("─", width)
+	return w
 }
 
 func padRight(s string, n int) string {

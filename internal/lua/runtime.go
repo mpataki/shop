@@ -473,6 +473,7 @@ func (r *Runtime) luaContext(L *lua.LState) int {
 func (r *Runtime) luaLog(L *lua.LState) int {
 	message := L.CheckString(1)
 	r.logs = append(r.logs, message)
+	r.emit(models.Event{Type: models.EventLogMessage, RunID: r.run.ID, Message: message})
 	return 0
 }
 

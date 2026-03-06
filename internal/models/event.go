@@ -7,11 +7,13 @@ const (
 	EventRunDeleted
 	EventAgentStarted
 	EventAgentCompleted
+	EventLogMessage
 )
 
 type Event struct {
-	Type   EventType
-	RunID  int64
-	Agent  string
-	Status RunStatus
+	Type    EventType
+	RunID   int64
+	Agent   string
+	Status  RunStatus
+	Message string
 }

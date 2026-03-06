@@ -98,11 +98,6 @@ func (o *Orchestrator) Execute(run *models.Run) error {
 	runtime := shopLua.NewRuntime(o.storage, run, ws, o.events)
 	err = runtime.Execute(run.WorkflowPath, run.InitialPrompt)
 
-	// Log any messages from the workflow
-	for _, log := range runtime.GetLogs() {
-		fmt.Printf("[lua] %s\n", log)
-	}
-
 	if err != nil {
 		// Check if we're waiting for human input - this is a valid state, not a failure
 		if err == shopLua.ErrWaitingHuman {

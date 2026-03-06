@@ -37,4 +37,12 @@ var (
 	helpStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("238"))
 	sepStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("237"))
 	errorStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("203"))
+
+	// Sections
+	boxStyle = lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(lipgloss.Color("237")).
+			Padding(0, 1)
+
+	logEntryStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("243"))
 )
