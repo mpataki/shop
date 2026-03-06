@@ -21,6 +21,7 @@ type Runtime struct {
 	storage   *storage.Storage
 	run       *models.Run
 	ws        *workspace.Workspace
+	events    chan<- models.Event
 	callIndex int
 	logs      []string
 
@@ -37,13 +38,22 @@ type Runtime struct {
 }
 
 // NewRuntime creates a new Lua runtime for executing a workflow
-func NewRuntime(store *storage.Storage, run *models.Run, ws *workspace.Workspace) *Runtime {
+func NewRuntime(store *storage.Storage, run *models.Run, ws *workspace.Workspace, events chan<- models.Event) *Runtime {
 	return &Runtime{
 		storage:   store,
 		run:       run,
 		ws:        ws,
+		events:    events,
 		callIndex: 0,
 		logs:      make([]string, 0),
+	}
+}
+
+// emit sends an event without blocking.
+func (r *Runtime) emit(e models.Event) {
+	select {
+	case r.events <- e:
+	default:
 	}
 }
 
@@ -292,6 +302,8 @@ func (r *Runtime) runAgent(agent, prompt string, exec *models.Execution) (map[st
 	// Build agent prompt
 	agentPrompt := r.buildAgentPrompt(agent, prompt)
 
+	r.emit(models.Event{Type: models.EventAgentStarted, RunID: r.run.ID, Agent: agent})
+
 	// Run Claude
 	sessionID, exitCode, err := r.runClaude(agent, agentPrompt, exec.ID)
 	if err != nil {
@@ -318,6 +330,8 @@ func (r *Runtime) runAgent(agent, prompt string, exec *models.Execution) (map[st
 	if err := r.storage.UpdateExecution(exec); err != nil {
 		return nil, err
 	}
+
+	r.emit(models.Event{Type: models.EventAgentCompleted, RunID: r.run.ID, Agent: agent})
 
 	// Check for NEEDS_HUMAN signal
 	if status, ok := signal["status"].(string); ok && status == "NEEDS_HUMAN" {
@@ -666,7 +680,11 @@ func (r *Runtime) markComplete() error {
 	now := time.Now()
 	r.run.Status = models.RunStatusComplete
 	r.run.CompletedAt = &now
-	return r.storage.UpdateRun(r.run)
+	if err := r.storage.UpdateRun(r.run); err != nil {
+		return err
+	}
+	r.emit(models.Event{Type: models.EventRunStatusChanged, RunID: r.run.ID, Status: models.RunStatusComplete})
+	return nil
 }
 
 // markStuck marks the run as stuck
@@ -675,7 +693,11 @@ func (r *Runtime) markStuck() error {
 	r.run.Status = models.RunStatusStuck
 	r.run.CompletedAt = &now
 	r.run.Error = r.stuckReason
-	return r.storage.UpdateRun(r.run)
+	if err := r.storage.UpdateRun(r.run); err != nil {
+		return err
+	}
+	r.emit(models.Event{Type: models.EventRunStatusChanged, RunID: r.run.ID, Status: models.RunStatusStuck})
+	return nil
 }
 
 // markWaitingHuman marks the run as waiting for human input
@@ -687,6 +709,7 @@ func (r *Runtime) markWaitingHuman() error {
 	if err := r.storage.UpdateRun(r.run); err != nil {
 		return err
 	}
+	r.emit(models.Event{Type: models.EventRunStatusChanged, RunID: r.run.ID, Status: models.RunStatusWaitingHuman})
 	return ErrWaitingHuman
 }
 

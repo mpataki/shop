@@ -18,12 +18,27 @@ import (
 type Orchestrator struct {
 	storage      *storage.Storage
 	workspaceDir string
+	events       chan models.Event
 }
 
 func New(store *storage.Storage, workspaceDir string) *Orchestrator {
 	return &Orchestrator{
 		storage:      store,
 		workspaceDir: workspaceDir,
+		events:       make(chan models.Event, 64),
+	}
+}
+
+// Subscribe returns a read-only channel of orchestrator events.
+func (o *Orchestrator) Subscribe() <-chan models.Event {
+	return o.events
+}
+
+// emit sends an event without blocking. Drops if the buffer is full.
+func (o *Orchestrator) emit(e models.Event) {
+	select {
+	case o.events <- e:
+	default:
 	}
 }
 
@@ -59,6 +74,7 @@ func (o *Orchestrator) StartRun(workflowPath, workflowName, prompt, sourceRepo s
 		return nil, fmt.Errorf("failed to initialize context: %w", err)
 	}
 
+	o.emit(models.Event{Type: models.EventRunStatusChanged, RunID: run.ID, Status: models.RunStatusPending})
 	return run, nil
 }
 
@@ -74,9 +90,10 @@ func (o *Orchestrator) Execute(run *models.Run) error {
 	if err := o.storage.UpdateRun(run); err != nil {
 		return err
 	}
+	o.emit(models.Event{Type: models.EventRunStatusChanged, RunID: run.ID, Status: models.RunStatusRunning})
 
 	// Create and execute the Lua runtime
-	runtime := shopLua.NewRuntime(o.storage, run, ws)
+	runtime := shopLua.NewRuntime(o.storage, run, ws, o.events)
 	err = runtime.Execute(run.WorkflowPath, run.InitialPrompt)
 
 	// Log any messages from the workflow
@@ -97,6 +114,7 @@ func (o *Orchestrator) Execute(run *models.Run) error {
 			run.CompletedAt = &now
 			run.Error = err.Error()
 			o.storage.UpdateRun(run)
+			o.emit(models.Event{Type: models.EventRunStatusChanged, RunID: run.ID, Status: models.RunStatusFailed})
 		}
 		return err
 	}
@@ -175,7 +193,11 @@ func (o *Orchestrator) KillRun(runID int64) error {
 	now := time.Now()
 	run.Status = models.RunStatusFailed
 	run.CompletedAt = &now
-	return o.storage.UpdateRun(run)
+	if err := o.storage.UpdateRun(run); err != nil {
+		return err
+	}
+	o.emit(models.Event{Type: models.EventRunStatusChanged, RunID: run.ID, Status: models.RunStatusFailed})
+	return nil
 }
 
 func (o *Orchestrator) DeleteRun(runID int64) error {
@@ -271,7 +293,11 @@ func (o *Orchestrator) StopRun(runID int64, reason string) error {
 	run.WaitingReason = ""
 	run.WaitingSessionID = ""
 
-	return o.storage.UpdateRun(run)
+	if err := o.storage.UpdateRun(run); err != nil {
+		return err
+	}
+	o.emit(models.Event{Type: models.EventRunStatusChanged, RunID: run.ID, Status: models.RunStatusStuck})
+	return nil
 }
 
 // ListWaitingRuns returns runs that are waiting for human input

@@ -65,25 +65,22 @@ func NewApp(orch *orchestrator.Orchestrator, cfg *config.Config) *App {
 }
 
 func (a *App) Init() tea.Cmd {
-	return tea.Batch(a.loadRuns, a.tickCmd())
+	return tea.Batch(a.loadRuns, a.waitForEvent())
 }
 
-func (a *App) tickCmd() tea.Cmd {
-	return tea.Tick(2*time.Second, func(t time.Time) tea.Msg {
-		return tickMsg(t)
-	})
-}
-
-func (a *App) hasRunningRuns() bool {
-	for _, run := range a.runs {
-		if run.Status == models.RunStatusRunning {
-			return true
+// waitForEvent blocks on the orchestrator event channel and delivers events as tea messages.
+func (a *App) waitForEvent() tea.Cmd {
+	ch := a.orchestrator.Subscribe()
+	return func() tea.Msg {
+		event, ok := <-ch
+		if !ok {
+			return nil
 		}
+		return orchestratorEventMsg(event)
 	}
-	return false
 }
 
-type tickMsg time.Time
+type orchestratorEventMsg models.Event
 
 func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
@@ -95,22 +92,25 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.height = msg.Height
 		return a, nil
 
+	case orchestratorEventMsg:
+		event := models.Event(msg)
+		var cmds []tea.Cmd
+		cmds = append(cmds, a.waitForEvent()) // re-subscribe for next event
+
+		switch a.view {
+		case ViewRunList:
+			cmds = append(cmds, a.loadRuns)
+		case ViewRunDetail:
+			if a.selectedRun != nil && event.RunID == a.selectedRun.ID {
+				cmds = append(cmds, a.loadRunDetail(a.selectedRun.ID))
+			}
+		}
+		return a, tea.Batch(cmds...)
+
 	case runsLoadedMsg:
 		a.runs = msg.runs
 		a.err = msg.err
-		// Continue ticking if there are running runs
-		if a.hasRunningRuns() {
-			return a, a.tickCmd()
-		}
 		return a, nil
-
-	case tickMsg:
-		// Only refresh if we're on the run list view and have running runs
-		if a.view == ViewRunList && a.hasRunningRuns() {
-			return a, tea.Batch(a.loadRuns, a.tickCmd())
-		}
-		// Keep ticking to detect new running runs
-		return a, a.tickCmd()
 
 	case runDetailMsg:
 		a.selectedRun = msg.run
