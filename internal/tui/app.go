@@ -8,11 +8,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"time"
 
+	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
 	"github.com/mpataki/shop/internal/config"
 	"github.com/mpataki/shop/internal/models"
 	"github.com/mpataki/shop/internal/orchestrator"
@@ -39,33 +38,38 @@ type App struct {
 	selectedExecIdx int
 	outputContent   string
 
-	// New run view state
 	workflows           []config.WorkflowInfo
 	selectedWorkflowIdx int
 	promptInput         textinput.Model
-	focusOnPrompt       bool // false = workflow list, true = prompt input
+	focusOnPrompt       bool
 
-	width  int
-	height int
-	err    error
+	spinner spinner.Model
+	width   int
+	height  int
+	err     error
 }
 
 func NewApp(orch *orchestrator.Orchestrator, cfg *config.Config) *App {
 	ti := textinput.New()
-	ti.Placeholder = "Enter your prompt..."
+	ti.Placeholder = "what should the agents do?"
 	ti.CharLimit = 500
 	ti.Width = 60
+
+	sp := spinner.New()
+	sp.Spinner = spinner.MiniDot
+	sp.Style = statusRunningStyle
 
 	return &App{
 		orchestrator: orch,
 		config:       cfg,
 		view:         ViewRunList,
 		promptInput:  ti,
+		spinner:      sp,
 	}
 }
 
 func (a *App) Init() tea.Cmd {
-	return tea.Batch(a.loadRuns, a.waitForEvent())
+	return tea.Batch(a.loadRuns, a.waitForEvent(), a.spinner.Tick)
 }
 
 // waitForEvent blocks on the orchestrator event channel and delivers events as tea messages.
@@ -84,6 +88,11 @@ type orchestratorEventMsg models.Event
 
 func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+	case spinner.TickMsg:
+		var cmd tea.Cmd
+		a.spinner, cmd = a.spinner.Update(msg)
+		return a, cmd
+
 	case tea.KeyMsg:
 		return a.handleKey(msg)
 
@@ -95,11 +104,10 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case orchestratorEventMsg:
 		event := models.Event(msg)
 		var cmds []tea.Cmd
-		cmds = append(cmds, a.waitForEvent()) // re-subscribe for next event
+		cmds = append(cmds, a.waitForEvent())
 
 		switch event.Type {
 		case models.EventRunDeleted:
-			// If viewing the deleted run, go back to list
 			if a.view == ViewRunDetail && a.selectedRun != nil && event.RunID == a.selectedRun.ID {
 				a.view = ViewRunList
 				a.selectedRun = nil
@@ -134,20 +142,17 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case runKilledMsg:
 		a.err = msg.err
-		// Reload runs list to show updated status
 		return a, a.loadRuns
 
 	case sessionResumedMsg:
 		if msg.err != nil {
 			a.err = msg.err
 		}
-		// Session ended, return to run list
 		a.view = ViewRunList
 		return a, a.loadRuns
 
 	case runDeletedMsg:
 		a.err = msg.err
-		// Adjust selection if needed
 		if a.selectedIdx >= len(a.runs)-1 && a.selectedIdx > 0 {
 			a.selectedIdx--
 		}
@@ -155,7 +160,6 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case runStoppedMsg:
 		a.err = msg.err
-		// Reload run detail if we're viewing it
 		if a.view == ViewRunDetail && a.selectedRun != nil {
 			return a, a.loadRunDetail(a.selectedRun.ID)
 		}
@@ -186,7 +190,6 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err != nil {
 			a.err = msg.err
 		} else {
-			// Return to run list and reload
 			a.view = ViewRunList
 		}
 		return a, a.loadRuns
@@ -213,85 +216,68 @@ func (a *App) handleRunListKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "q", "ctrl+c":
 		return a, tea.Quit
-
 	case "up", "k":
 		if a.selectedIdx > 0 {
 			a.selectedIdx--
 		}
-
 	case "down", "j":
 		if a.selectedIdx < len(a.runs)-1 {
 			a.selectedIdx++
 		}
-
 	case "enter", "l":
 		if len(a.runs) > 0 && a.selectedIdx < len(a.runs) {
 			return a, a.loadRunDetail(a.runs[a.selectedIdx].ID)
 		}
-
 	case "G":
 		if len(a.runs) > 0 {
 			a.selectedIdx = len(a.runs) - 1
 		}
-
 	case "g":
 		a.selectedIdx = 0
-
 	case "n":
 		return a, a.enterNewRunView()
-
 	case "x":
 		if len(a.runs) > 0 && a.selectedIdx < len(a.runs) {
 			return a, a.killRun(a.runs[a.selectedIdx].ID)
 		}
-
 	case "d":
 		if len(a.runs) > 0 && a.selectedIdx < len(a.runs) {
 			return a, a.deleteRun(a.runs[a.selectedIdx].ID)
 		}
-
 	case "c":
 		if len(a.runs) > 0 && a.selectedIdx < len(a.runs) {
 			run := a.runs[a.selectedIdx]
 			if run.Status == models.RunStatusWaitingHuman && run.WaitingSessionID != "" {
-				workDir := run.WorkspacePath + "/repo"
-				return a, a.continueSession(run.WaitingSessionID, workDir)
+				return a, a.continueSession(run.WaitingSessionID, run.WorkspacePath+"/repo")
 			}
 		}
 	}
-
 	return a, nil
 }
 
 func (a *App) handleRunDetailKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
-	case "q", "esc", "h":
+	case "q", "ctrl+c":
+		return a, tea.Quit
+	case "esc", "h":
 		a.view = ViewRunList
 		a.selectedRun = nil
 		a.executions = nil
 		a.selectedExecIdx = 0
-
-	case "ctrl+c":
-		return a, tea.Quit
-
 	case "up", "k":
 		if a.selectedExecIdx > 0 {
 			a.selectedExecIdx--
 		}
-
 	case "down", "j":
 		if a.selectedExecIdx < len(a.executions)-1 {
 			a.selectedExecIdx++
 		}
-
 	case "G":
 		if len(a.executions) > 0 {
 			a.selectedExecIdx = len(a.executions) - 1
 		}
-
 	case "g":
 		a.selectedExecIdx = 0
-
 	case "enter", "l":
 		if len(a.executions) > 0 && a.selectedExecIdx < len(a.executions) {
 			exec := a.executions[a.selectedExecIdx]
@@ -300,7 +286,6 @@ func (a *App) handleRunDetailKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				return a, a.resumeSession(exec.ClaudeSessionID, workDir)
 			}
 		}
-
 	case "o":
 		if len(a.executions) > 0 && a.selectedExecIdx < len(a.executions) {
 			exec := a.executions[a.selectedExecIdx]
@@ -308,7 +293,6 @@ func (a *App) handleRunDetailKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				return a, a.loadOutput(exec.ClaudeSessionID, a.selectedRun.WorkspacePath)
 			}
 		}
-
 	case "c":
 		if a.selectedRun != nil && a.selectedRun.Status == models.RunStatusWaitingHuman {
 			if a.selectedRun.WaitingSessionID != "" {
@@ -316,412 +300,70 @@ func (a *App) handleRunDetailKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				return a, a.continueSession(a.selectedRun.WaitingSessionID, workDir)
 			}
 		}
-
 	case "s":
 		if a.selectedRun != nil && a.selectedRun.Status == models.RunStatusWaitingHuman {
 			return a, a.stopRun(a.selectedRun.ID)
 		}
 	}
-
 	return a, nil
 }
 
 func (a *App) handleOutputKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
-	case "q", "esc", "h":
+	case "q", "ctrl+c":
+		return a, tea.Quit
+	case "esc", "h":
 		a.view = ViewRunDetail
 		a.outputContent = ""
-
-	case "ctrl+c":
-		return a, tea.Quit
 	}
-
 	return a, nil
 }
 
 func (a *App) handleNewRunKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	// If focused on prompt, handle text input first
 	if a.focusOnPrompt {
 		switch msg.String() {
+		case "ctrl+c":
+			return a, tea.Quit
 		case "esc":
-			// Blur prompt and go back to workflow selection
 			a.focusOnPrompt = false
 			a.promptInput.Blur()
 			return a, nil
-
-		case "ctrl+c":
-			return a, tea.Quit
-
 		case "enter":
-			// Start the run if we have a prompt
 			if a.promptInput.Value() != "" && len(a.workflows) > 0 {
 				return a, a.startNewRun()
 			}
 			return a, nil
-
 		default:
-			// Pass to text input
 			var cmd tea.Cmd
 			a.promptInput, cmd = a.promptInput.Update(msg)
 			return a, cmd
 		}
 	}
 
-	// Workflow list navigation
 	switch msg.String() {
-	case "esc":
-		a.view = ViewRunList
-		return a, nil
-
 	case "ctrl+c":
 		return a, tea.Quit
-
+	case "esc":
+		a.view = ViewRunList
 	case "up", "k":
 		if a.selectedWorkflowIdx > 0 {
 			a.selectedWorkflowIdx--
 		}
-
 	case "down", "j":
 		if a.selectedWorkflowIdx < len(a.workflows)-1 {
 			a.selectedWorkflowIdx++
 		}
-
 	case "enter", "tab":
-		// Focus on prompt input
 		if len(a.workflows) > 0 {
 			a.focusOnPrompt = true
 			a.promptInput.Focus()
 			return a, textinput.Blink
 		}
 	}
-
 	return a, nil
 }
 
-func (a *App) View() string {
-	switch a.view {
-	case ViewRunList:
-		return a.viewRunList()
-	case ViewRunDetail:
-		return a.viewRunDetail()
-	case ViewNewRun:
-		return a.viewNewRun()
-	case ViewOutput:
-		return a.viewOutput()
-	}
-	return ""
-}
-
-var (
-	titleStyle = lipgloss.NewStyle().
-			Bold(true).
-			Foreground(lipgloss.Color("205"))
-
-	selectedStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("229")).
-			Background(lipgloss.Color("57"))
-
-	dimStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("243"))
-
-	statusRunning  = lipgloss.NewStyle().Foreground(lipgloss.Color("220"))
-	statusComplete = lipgloss.NewStyle().Foreground(lipgloss.Color("46"))
-	statusFailed   = lipgloss.NewStyle().Foreground(lipgloss.Color("196"))
-	statusStuck    = lipgloss.NewStyle().Foreground(lipgloss.Color("208"))
-	statusPending  = lipgloss.NewStyle().Foreground(lipgloss.Color("243"))
-	statusWaiting  = lipgloss.NewStyle().Foreground(lipgloss.Color("141")) // purple for waiting
-
-	// Signal status colors
-	signalApproved   = lipgloss.NewStyle().Foreground(lipgloss.Color("46"))  // green
-	signalDone       = lipgloss.NewStyle().Foreground(lipgloss.Color("46"))  // green
-	signalChanges    = lipgloss.NewStyle().Foreground(lipgloss.Color("220")) // yellow
-	signalBlocked    = lipgloss.NewStyle().Foreground(lipgloss.Color("196")) // red
-	signalNeedsHuman = lipgloss.NewStyle().Foreground(lipgloss.Color("141")) // purple
-
-	helpStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("241"))
-
-	labelStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("243"))
-)
-
-func (a *App) viewRunList() string {
-	s := titleStyle.Render("Shop") + "\n\n"
-
-	if a.err != nil {
-		s += fmt.Sprintf("Error: %v\n", a.err)
-	}
-
-	if len(a.runs) == 0 {
-		s += "No runs yet. Press 'n' to create one.\n"
-	} else {
-		s += "Recent Runs\n"
-		s += "───────────\n"
-
-		for i, run := range a.runs {
-			line := a.formatRunLine(run)
-			isSelected := i == a.selectedIdx
-			isActive := run.Status == models.RunStatusRunning ||
-				run.Status == models.RunStatusWaitingHuman ||
-				run.Status == models.RunStatusStuck
-
-			if isSelected {
-				line = selectedStyle.Render("▶ " + line)
-			} else if !isActive {
-				// Dim completed/failed runs
-				line = "  " + dimStyle.Render(line)
-			} else {
-				line = "  " + line
-			}
-			s += line + "\n"
-		}
-	}
-
-	s += "\n" + helpStyle.Render("[j/k] navigate  [l/enter] view  [n] new  [c] continue  [x] kill  [d] delete  [q] quit")
-
-	return s
-}
-
-func (a *App) formatRunLine(run *models.Run) string {
-	status := a.formatStatus(run.Status)
-	age := a.formatAge(run.CreatedAt)
-	prompt := truncate(run.InitialPrompt, 35)
-	return fmt.Sprintf("#%-3d %-18s %s  %-6s  %s", run.ID, run.WorkflowName, status, age, prompt)
-}
-
-func (a *App) formatAge(t time.Time) string {
-	d := time.Since(t)
-	switch {
-	case d < time.Minute:
-		return "now"
-	case d < time.Hour:
-		return fmt.Sprintf("%dm", int(d.Minutes()))
-	case d < 24*time.Hour:
-		return fmt.Sprintf("%dh", int(d.Hours()))
-	default:
-		days := int(d.Hours() / 24)
-		return fmt.Sprintf("%dd", days)
-	}
-}
-
-func (a *App) formatStatus(status models.RunStatus) string {
-	switch status {
-	case models.RunStatusRunning:
-		return statusRunning.Render("● running")
-	case models.RunStatusComplete:
-		return statusComplete.Render("✓ complete")
-	case models.RunStatusFailed:
-		return statusFailed.Render("✗ failed")
-	case models.RunStatusStuck:
-		return statusStuck.Render("⚠ stuck")
-	case models.RunStatusWaitingHuman:
-		return statusWaiting.Render("⏸ waiting")
-	default:
-		return string(status)
-	}
-}
-
-func (a *App) viewRunDetail() string {
-	if a.selectedRun == nil {
-		return "No run selected"
-	}
-
-	run := a.selectedRun
-
-	// Header with status badge
-	header := fmt.Sprintf("Run #%d: %s", run.ID, run.WorkflowName)
-	s := titleStyle.Render(header) + "  " + a.formatStatus(run.Status) + "\n\n"
-
-	// Full prompt
-	s += run.InitialPrompt + "\n\n"
-
-	// Workspace path
-	s += labelStyle.Render("Workspace: ") + dimStyle.Render(run.WorkspacePath) + "\n"
-
-	// Show waiting information for waiting_human status
-	if run.Status == models.RunStatusWaitingHuman {
-		s += "\n"
-		if run.CurrentAgent != "" {
-			s += labelStyle.Render("Agent: ") + run.CurrentAgent + "\n"
-		}
-		if run.WaitingReason != "" {
-			s += labelStyle.Render("Reason: ") + statusWaiting.Render(run.WaitingReason) + "\n"
-		}
-		s += "\n"
-	} else {
-		s += "\n"
-	}
-
-	s += "Executions\n"
-	s += "──────────\n"
-
-	if len(a.executions) == 0 {
-		s += "(no executions yet)\n"
-	} else {
-		for i, exec := range a.executions {
-			status := "○"
-			switch exec.Status {
-			case models.ExecStatusComplete:
-				status = statusComplete.Render("✓")
-			case models.ExecStatusRunning:
-				status = statusRunning.Render("●")
-			case models.ExecStatusFailed:
-				status = statusFailed.Render("✗")
-			case models.ExecStatusWaitingHuman:
-				status = statusWaiting.Render("⏸")
-			}
-
-			// Exit code
-			exitCode := ""
-			if exec.ExitCode != nil {
-				if *exec.ExitCode == 0 {
-					exitCode = dimStyle.Render("exit:0")
-				} else {
-					exitCode = statusFailed.Render(fmt.Sprintf("exit:%d", *exec.ExitCode))
-				}
-			}
-
-			// Duration
-			duration := ""
-			if exec.StartedAt != nil && exec.CompletedAt != nil {
-				d := exec.CompletedAt.Sub(*exec.StartedAt)
-				duration = dimStyle.Render(formatDuration(d))
-			} else if exec.StartedAt != nil && exec.Status == models.ExecStatusRunning {
-				d := time.Since(*exec.StartedAt)
-				duration = statusRunning.Render(formatDuration(d) + "...")
-			}
-
-			// Signal status with color
-			signalStatus := ""
-			if exec.OutputSignal != nil {
-				if sig, ok := exec.OutputSignal["status"].(string); ok {
-					signalStatus = a.formatSignalStatus(sig)
-				}
-			}
-
-			// Build line: "1. coder      ✓  exit:0  32s   DONE"
-			line := fmt.Sprintf("%d. %-10s %s", exec.SequenceNum, exec.AgentName, status)
-			if exitCode != "" {
-				line += "  " + exitCode
-			}
-			if duration != "" {
-				line += "  " + fmt.Sprintf("%6s", duration)
-			}
-			if signalStatus != "" {
-				line += "   " + signalStatus
-			}
-
-			if i == a.selectedExecIdx {
-				line = selectedStyle.Render("▶ " + line)
-			} else {
-				line = "  " + line
-			}
-			s += line + "\n"
-		}
-	}
-
-	// Show appropriate help based on run status
-	if run.Status == models.RunStatusWaitingHuman {
-		s += "\n" + helpStyle.Render("[j/k] navigate  [c] continue  [s] stop  [o] output  [h] back  [q] quit")
-	} else {
-		s += "\n" + helpStyle.Render("[j/k] navigate  [l/enter] resume  [o] output  [h] back  [q] quit")
-	}
-
-	return s
-}
-
-func (a *App) formatSignalStatus(status string) string {
-	switch models.SignalStatus(status) {
-	case models.SignalApproved, models.SignalDone, models.SignalContinue:
-		return signalApproved.Render(status)
-	case models.SignalChangesRequested:
-		return signalChanges.Render(status)
-	case models.SignalBlocked, models.SignalStop:
-		return signalBlocked.Render(status)
-	case models.SignalNeedsHuman:
-		return signalNeedsHuman.Render(status)
-	default:
-		return status
-	}
-}
-
-func (a *App) viewNewRun() string {
-	s := titleStyle.Render("New Run") + "\n\n"
-
-	if a.err != nil {
-		s += fmt.Sprintf("Error: %v\n\n", a.err)
-	}
-
-	// Workflow selection
-	s += "Select Workflow\n"
-	s += "───────────────\n"
-
-	if len(a.workflows) == 0 {
-		s += dimStyle.Render("No workflows found in .shop/workflows/ or ~/.shop/workflows/") + "\n"
-	} else {
-		for i, wf := range a.workflows {
-			line := wf.Name
-			if wf.Source == "user" {
-				line += dimStyle.Render(" (user)")
-			}
-
-			if i == a.selectedWorkflowIdx {
-				if !a.focusOnPrompt {
-					line = selectedStyle.Render("▶ " + line)
-				} else {
-					line = "▶ " + line
-				}
-			} else {
-				line = "  " + line
-			}
-			s += line + "\n"
-		}
-	}
-
-	s += "\n"
-
-	// Prompt input
-	s += "Prompt\n"
-	s += "──────\n"
-
-	if a.focusOnPrompt {
-		s += a.promptInput.View() + "\n"
-	} else {
-		// Show placeholder when not focused
-		if a.promptInput.Value() == "" {
-			s += dimStyle.Render("Press Enter or Tab to enter prompt...") + "\n"
-		} else {
-			s += a.promptInput.Value() + "\n"
-		}
-	}
-
-	s += "\n"
-
-	// Help text
-	if a.focusOnPrompt {
-		s += helpStyle.Render("[enter] start run  [esc] back to workflow  [ctrl+c] quit")
-	} else {
-		s += helpStyle.Render("[↑/↓] select  [enter/tab] edit prompt  [esc] cancel  [ctrl+c] quit")
-	}
-
-	return s
-}
-
-func (a *App) viewOutput() string {
-	s := titleStyle.Render("Output") + "\n\n"
-
-	if a.outputContent == "" {
-		s += "(no output)\n"
-	} else {
-		s += a.outputContent + "\n"
-	}
-
-	s += "\n" + helpStyle.Render("[esc] back  [q] quit")
-
-	return s
-}
-
-// Messages
+// ── Messages ──────────────────────────────────────────────────────────────────
 
 type runsLoadedMsg struct {
 	runs []*models.Run
@@ -769,7 +411,7 @@ type runStartedMsg struct {
 	err   error
 }
 
-// Commands
+// ── Commands ──────────────────────────────────────────────────────────────────
 
 func (a *App) loadRuns() tea.Msg {
 	runs, err := a.orchestrator.ListRuns(20)
@@ -782,7 +424,6 @@ func (a *App) loadRunDetail(id int64) tea.Cmd {
 		if err != nil {
 			return runDetailMsg{err: err}
 		}
-
 		execs, err := a.orchestrator.GetExecutionsForRun(id)
 		return runDetailMsg{run: run, executions: execs, err: err}
 	}
@@ -833,7 +474,6 @@ func (a *App) continueSession(sessionID string, workDir string) tea.Cmd {
 
 func (a *App) loadOutput(sessionID string, workspacePath string) tea.Cmd {
 	return func() tea.Msg {
-		// Claude stores sessions in ~/.claude/projects/{encoded-path}/{sessionID}.jsonl
 		homeDir, err := os.UserHomeDir()
 		if err != nil {
 			return outputLoadedMsg{err: err}
@@ -849,10 +489,8 @@ func (a *App) loadOutput(sessionID string, workspacePath string) tea.Cmd {
 		}
 		defer file.Close()
 
-		// Read JSONL and find the last assistant message
 		var lastContent string
 		scanner := bufio.NewScanner(file)
-		// Increase buffer size for large lines
 		buf := make([]byte, 0, 64*1024)
 		scanner.Buffer(buf, 1024*1024)
 
@@ -861,12 +499,9 @@ func (a *App) loadOutput(sessionID string, workspacePath string) tea.Cmd {
 			if err := json.Unmarshal(scanner.Bytes(), &entry); err != nil {
 				continue
 			}
-
-			// Check if this is an assistant message
 			if entry["type"] == "assistant" {
 				if msg, ok := entry["message"].(map[string]any); ok {
 					if content, ok := msg["content"].([]any); ok {
-						// Build text from content blocks
 						var text string
 						for _, block := range content {
 							if b, ok := block.(map[string]any); ok {
@@ -883,8 +518,6 @@ func (a *App) loadOutput(sessionID string, workspacePath string) tea.Cmd {
 					}
 				}
 			}
-
-			// Also check for summary type as fallback
 			if entry["type"] == "summary" {
 				if summary, ok := entry["summary"].(string); ok && lastContent == "" {
 					lastContent = summary
@@ -895,36 +528,10 @@ func (a *App) loadOutput(sessionID string, workspacePath string) tea.Cmd {
 		if lastContent == "" {
 			return outputLoadedMsg{content: "(no output found)"}
 		}
-
 		return outputLoadedMsg{content: lastContent}
 	}
 }
 
-func truncate(s string, maxLen int) string {
-	if len(s) <= maxLen {
-		return s
-	}
-	return s[:maxLen-3] + "..."
-}
-
-func formatDuration(d time.Duration) string {
-	if d < time.Second {
-		return fmt.Sprintf("%dms", d.Milliseconds())
-	}
-	if d < time.Minute {
-		return fmt.Sprintf("%ds", int(d.Seconds()))
-	}
-	if d < time.Hour {
-		m := int(d.Minutes())
-		s := int(d.Seconds()) % 60
-		return fmt.Sprintf("%dm%ds", m, s)
-	}
-	h := int(d.Hours())
-	m := int(d.Minutes()) % 60
-	return fmt.Sprintf("%dh%dm", h, m)
-}
-
-// enterNewRunView loads workflows and switches to the new run view
 func (a *App) enterNewRunView() tea.Cmd {
 	return func() tea.Msg {
 		workflows, err := a.config.ListWorkflows()
@@ -932,17 +539,14 @@ func (a *App) enterNewRunView() tea.Cmd {
 	}
 }
 
-// startNewRun creates and starts a new workflow run
 func (a *App) startNewRun() tea.Cmd {
 	return func() tea.Msg {
 		if a.selectedWorkflowIdx >= len(a.workflows) {
 			return runStartedMsg{err: fmt.Errorf("no workflow selected")}
 		}
-
 		wf := a.workflows[a.selectedWorkflowIdx]
 		prompt := a.promptInput.Value()
 
-		// Get current working directory for the repo
 		cwd, err := os.Getwd()
 		if err != nil {
 			return runStartedMsg{err: fmt.Errorf("failed to get working directory: %w", err)}
@@ -953,9 +557,7 @@ func (a *App) startNewRun() tea.Cmd {
 			return runStartedMsg{err: err}
 		}
 
-		// Execute the run in background
 		go a.orchestrator.Execute(run)
-
 		return runStartedMsg{runID: run.ID}
 	}
 }
