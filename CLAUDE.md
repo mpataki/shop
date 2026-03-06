@@ -9,9 +9,9 @@ Shop orchestrates multiple Claude Code agents through Lua workflow scripts. It r
 ```
 cmd/shop/main.go          CLI entry point (run, resume, status, list, kill, delete, continue, stop)
 internal/
-  config/config.go        Paths: ~/.shop/shop.db, .shop/specs/, ~/.shop/specs/
+  config/config.go        Paths: ~/.shop/shop.db, .shop/workflows/, ~/.shop/workflows/
   storage/sqlite.go       SQLite schema and CRUD for runs/executions
-  models/run.go           Run struct (ID, Status, SpecPath, Error, WaitingReason, etc.)
+  models/run.go           Run struct (ID, Status, WorkflowPath, Error, WaitingReason, etc.)
   models/execution.go     Execution struct (AgentName, CallIndex, OutputSignal, etc.)
   orchestrator/           StartRun, Execute, Resume, KillRun, DeleteRun, ContinueRun, StopRun
   lua/runtime.go          Sandboxed Lua VM with run(), stuck(), pause(), context(), log()
@@ -22,7 +22,7 @@ internal/
 ## Key Concepts
 
 ### Lua Workflows
-Specs are Lua scripts in `.shop/specs/` or `~/.shop/specs/` that define a `workflow(prompt)` function:
+Workflows are Lua scripts in `.shop/workflows/` or `~/.shop/workflows/` that define a `workflow(prompt)` function:
 
 ```lua
 function workflow(prompt)
@@ -68,7 +68,7 @@ Agents must exist as `.claude/agents/{name}.md` in the workspace and must write 
 ## Database Schema
 
 ```sql
-runs (id, status, spec_path, initial_prompt, workspace_path, current_agent, error, waiting_reason, waiting_session_id, ...)
+runs (id, status, workflow_path, initial_prompt, workspace_path, current_agent, error, waiting_reason, waiting_session_id, ...)
 executions (id, run_id, call_index, agent_name, status, output_signal, session_id, pid, ...)
 ```
 
@@ -77,16 +77,16 @@ Run statuses: `pending`, `running`, `complete`, `failed`, `stuck`, `waiting_huma
 ## CLI Commands
 
 ```bash
-shop run <spec> <prompt>   # Start workflow
-shop resume <run-id>       # Resume from last successful call_index
-shop status <run-id>       # Show run details
-shop list                  # List recent runs
-shop list --active         # List only active runs (running, waiting, pending)
-shop kill <run-id>         # Kill running process
-shop delete <run-id>       # Remove run and workspace
-shop continue <run-id>     # Open Claude session for waiting run
-shop stop <run-id>         # Stop a waiting run
-shop                       # Launch TUI
+shop run <workflow> <prompt>   # Start workflow
+shop resume <run-id>           # Resume from last successful call_index
+shop status <run-id>           # Show run details
+shop list                      # List recent runs
+shop list --active             # List only active runs (running, waiting, pending)
+shop kill <run-id>             # Kill running process
+shop delete <run-id>           # Remove run and workspace
+shop continue <run-id>         # Open Claude session for waiting run
+shop stop <run-id>             # Stop a waiting run
+shop                           # Launch TUI
 ```
 
 ## Lua API (available in workflow scripts)
@@ -118,8 +118,8 @@ See `specs/human-interaction.md` for full specification.
 ## File Locations
 
 - Database: `~/.shop/shop.db`
-- User specs: `~/.shop/specs/*.lua`
-- Project specs: `.shop/specs/*.lua` (takes precedence)
+- User workflows: `~/.shop/workflows/*.lua`
+- Project workflows: `.shop/workflows/*.lua` (takes precedence)
 - Workspaces: `~/.shop/workspaces/run-{id}/`
 
 ## Dependencies
@@ -130,6 +130,6 @@ See `specs/human-interaction.md` for full specification.
 - `github.com/charmbracelet/bubbletea` - TUI
 - `github.com/charmbracelet/lipgloss` - TUI styling
 
-## Spec Documentation
+## Workflow Documentation
 
 See `specs/lua.md` for the complete Lua workflow specification including resume semantics, determinism requirements, and error handling.

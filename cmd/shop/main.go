@@ -59,7 +59,7 @@ func runTUI(cmd *cobra.Command, args []string) error {
 
 	orch := orchestrator.New(store, cfg.WorkspacesDir())
 
-	app := tui.NewApp(orch)
+	app := tui.NewApp(orch, cfg)
 	p := tea.NewProgram(app, tea.WithAltScreen())
 
 	_, err = p.Run()
@@ -68,11 +68,11 @@ func runTUI(cmd *cobra.Command, args []string) error {
 
 func newRunCommand() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "run <spec> <prompt>",
-		Short: "Start a new run with a Lua workflow spec",
+		Use:   "run <workflow> <prompt>",
+		Short: "Start a new run with a Lua workflow",
 		Args:  cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			specName := args[0]
+			workflowName := args[0]
 			prompt := args[1]
 			noExec, _ := cmd.Flags().GetBool("no-exec")
 			repoPath, _ := cmd.Flags().GetString("repo")
@@ -94,13 +94,13 @@ func newRunCommand() *cobra.Command {
 
 			orch := orchestrator.New(store, cfg.WorkspacesDir())
 
-			// Find Lua spec
-			specPath := findLuaSpec(specName, cfg)
-			if specPath == "" {
-				return fmt.Errorf("spec %q not found (looked in %s and %s)", specName, cfg.ProjectSpecDir, cfg.UserSpecDir)
+			// Find workflow
+			workflowPath := findWorkflow(workflowName, cfg)
+			if workflowPath == "" {
+				return fmt.Errorf("workflow %q not found (looked in %s and %s)", workflowName, cfg.ProjectWorkflowDir, cfg.UserWorkflowDir)
 			}
 
-			return runLuaSpec(orch, specPath, specName, prompt, repoPath, noExec)
+			return runWorkflow(orch, workflowPath, workflowName, prompt, repoPath, noExec)
 		},
 	}
 
@@ -109,10 +109,10 @@ func newRunCommand() *cobra.Command {
 	return cmd
 }
 
-// findLuaSpec looks for a Lua spec file in the standard locations
-func findLuaSpec(name string, cfg *config.Config) string {
-	// Check project directory first (.shop/specs/)
-	dirs := []string{cfg.ProjectSpecDir, cfg.UserSpecDir}
+// findWorkflow looks for a Lua workflow file in the standard locations
+func findWorkflow(name string, cfg *config.Config) string {
+	// Check project directory first (.shop/workflows/)
+	dirs := []string{cfg.ProjectWorkflowDir, cfg.UserWorkflowDir}
 
 	for _, dir := range dirs {
 		// Try exact name if it ends with .lua
@@ -133,28 +133,28 @@ func findLuaSpec(name string, cfg *config.Config) string {
 	return ""
 }
 
-// runLuaSpec runs a Lua workflow spec
-func runLuaSpec(orch *orchestrator.Orchestrator, specPath, specName, prompt, repoPath string, noExec bool) error {
-	// Verify it's a valid Lua spec
-	if !shopLua.IsLuaSpec(specPath) {
-		return fmt.Errorf("not a Lua spec: %s", specPath)
+// runWorkflow runs a Lua workflow
+func runWorkflow(orch *orchestrator.Orchestrator, workflowPath, workflowName, prompt, repoPath string, noExec bool) error {
+	// Verify it's a valid Lua workflow
+	if !shopLua.IsWorkflow(workflowPath) {
+		return fmt.Errorf("not a Lua workflow: %s", workflowPath)
 	}
 
-	run, err := orch.StartRun(specPath, specName, prompt, repoPath)
+	run, err := orch.StartRun(workflowPath, workflowName, prompt, repoPath)
 	if err != nil {
 		return fmt.Errorf("failed to start run: %w", err)
 	}
 
 	fmt.Printf("Created run #%d\n", run.ID)
 	fmt.Printf("Workspace: %s\n", run.WorkspacePath)
-	fmt.Printf("Spec: %s\n", specPath)
+	fmt.Printf("Workflow: %s\n", workflowPath)
 
 	if noExec {
 		fmt.Println("Skipping execution (--no-exec)")
 		return nil
 	}
 
-	fmt.Printf("Executing workflow %q...\n", specName)
+	fmt.Printf("Executing workflow %q...\n", workflowName)
 	if err := orch.Execute(run); err != nil {
 		// Re-fetch run to get updated status
 		run, _ = orch.GetRun(run.ID)
@@ -209,7 +209,7 @@ func newResumeCommand() *cobra.Command {
 			}
 
 			fmt.Printf("Resuming run #%d\n", runID)
-			fmt.Printf("Spec: %s\n", run.SpecPath)
+			fmt.Printf("Workflow: %s\n", run.WorkflowPath)
 
 			if err := orch.Resume(runID); err != nil {
 				// Re-fetch run to get updated status
@@ -264,12 +264,12 @@ func newStatusCommand() *cobra.Command {
 				return fmt.Errorf("failed to get run: %w", err)
 			}
 
-			fmt.Printf("Run #%d: %s\n", run.ID, run.SpecName)
+			fmt.Printf("Run #%d: %s\n", run.ID, run.WorkflowName)
 			fmt.Printf("Status: %s\n", run.Status)
 			fmt.Printf("Prompt: %s\n", run.InitialPrompt)
 			fmt.Printf("Workspace: %s\n", run.WorkspacePath)
-			if run.SpecPath != "" {
-				fmt.Printf("Spec: %s\n", run.SpecPath)
+			if run.WorkflowPath != "" {
+				fmt.Printf("Workflow: %s\n", run.WorkflowPath)
 			}
 			if run.CurrentAgent != "" {
 				fmt.Printf("Agent: %s\n", run.CurrentAgent)
@@ -368,7 +368,7 @@ func newListCommand() *cobra.Command {
 			}
 
 			// Print header
-			fmt.Printf("%-4s %-15s %-14s %-12s %s\n", "ID", "SPEC", "STATUS", "AGENT", "WAITING FOR")
+			fmt.Printf("%-4s %-15s %-14s %-12s %s\n", "ID", "WORKFLOW", "STATUS", "AGENT", "WAITING FOR")
 
 			for _, run := range runs {
 				status := string(run.Status)
@@ -383,7 +383,7 @@ func newListCommand() *cobra.Command {
 				}
 
 				fmt.Printf("%-4d %-15s %-14s %-12s %s\n",
-					run.ID, truncate(run.SpecName, 15), status, truncate(agent, 12), waitingFor)
+					run.ID, truncate(run.WorkflowName, 15), status, truncate(agent, 12), waitingFor)
 			}
 
 			return nil

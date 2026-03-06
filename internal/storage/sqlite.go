@@ -14,7 +14,9 @@ type Storage struct {
 }
 
 func New(dbPath string) (*Storage, error) {
-	db, err := sql.Open("sqlite", dbPath)
+	// Add busy_timeout and WAL mode for better concurrent access
+	dsn := dbPath + "?_busy_timeout=5000&_journal_mode=WAL"
+	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, err
 	}
@@ -39,7 +41,7 @@ func (s *Storage) migrate() error {
 		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 		completed_at TIMESTAMP,
 		initial_prompt TEXT NOT NULL,
-		spec_name TEXT NOT NULL,
+		workflow_name TEXT NOT NULL,
 		workspace_path TEXT NOT NULL,
 		status TEXT NOT NULL DEFAULT 'pending',
 		current_agent TEXT
@@ -72,7 +74,7 @@ func (s *Storage) migrate() error {
 	s.db.Exec(`ALTER TABLE executions ADD COLUMN pid INTEGER`)
 
 	// Migration: add Lua workflow support columns
-	s.db.Exec(`ALTER TABLE runs ADD COLUMN spec_path TEXT`)
+	s.db.Exec(`ALTER TABLE runs ADD COLUMN workflow_path TEXT`)
 	s.db.Exec(`ALTER TABLE runs ADD COLUMN error TEXT`)
 	s.db.Exec(`ALTER TABLE executions ADD COLUMN call_index INTEGER`)
 	s.db.Exec(`ALTER TABLE executions ADD COLUMN prompt TEXT`)
@@ -89,9 +91,9 @@ func (s *Storage) migrate() error {
 
 func (s *Storage) CreateRun(run *models.Run) (int64, error) {
 	result, err := s.db.Exec(
-		`INSERT INTO runs (initial_prompt, spec_name, workspace_path, status, current_agent, spec_path, error, waiting_reason, waiting_session_id)
+		`INSERT INTO runs (initial_prompt, workflow_name, workspace_path, status, current_agent, workflow_path, error, waiting_reason, waiting_session_id)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		run.InitialPrompt, run.SpecName, run.WorkspacePath, run.Status, run.CurrentAgent, run.SpecPath, run.Error,
+		run.InitialPrompt, run.WorkflowName, run.WorkspacePath, run.Status, run.CurrentAgent, run.WorkflowPath, run.Error,
 		run.WaitingReason, run.WaitingSessionID,
 	)
 	if err != nil {
@@ -102,17 +104,17 @@ func (s *Storage) CreateRun(run *models.Run) (int64, error) {
 
 func (s *Storage) GetRun(id int64) (*models.Run, error) {
 	row := s.db.QueryRow(
-		`SELECT id, created_at, completed_at, initial_prompt, spec_name, workspace_path, status, current_agent, spec_path, error, waiting_reason, waiting_session_id
+		`SELECT id, created_at, completed_at, initial_prompt, workflow_name, workspace_path, status, current_agent, workflow_path, error, waiting_reason, waiting_session_id
 		 FROM runs WHERE id = ?`, id,
 	)
 
 	var run models.Run
 	var completedAt sql.NullTime
-	var currentAgent, specPath, runError, waitingReason, waitingSessionID sql.NullString
+	var currentAgent, workflowPath, runError, waitingReason, waitingSessionID sql.NullString
 
 	err := row.Scan(
 		&run.ID, &run.CreatedAt, &completedAt, &run.InitialPrompt,
-		&run.SpecName, &run.WorkspacePath, &run.Status, &currentAgent, &specPath, &runError,
+		&run.WorkflowName, &run.WorkspacePath, &run.Status, &currentAgent, &workflowPath, &runError,
 		&waitingReason, &waitingSessionID,
 	)
 	if err != nil {
@@ -125,8 +127,8 @@ func (s *Storage) GetRun(id int64) (*models.Run, error) {
 	if currentAgent.Valid {
 		run.CurrentAgent = currentAgent.String
 	}
-	if specPath.Valid {
-		run.SpecPath = specPath.String
+	if workflowPath.Valid {
+		run.WorkflowPath = workflowPath.String
 	}
 	if runError.Valid {
 		run.Error = runError.String
@@ -143,15 +145,15 @@ func (s *Storage) GetRun(id int64) (*models.Run, error) {
 
 func (s *Storage) UpdateRun(run *models.Run) error {
 	_, err := s.db.Exec(
-		`UPDATE runs SET completed_at = ?, status = ?, current_agent = ?, workspace_path = ?, spec_path = ?, error = ?, waiting_reason = ?, waiting_session_id = ? WHERE id = ?`,
-		run.CompletedAt, run.Status, run.CurrentAgent, run.WorkspacePath, run.SpecPath, run.Error, run.WaitingReason, run.WaitingSessionID, run.ID,
+		`UPDATE runs SET completed_at = ?, status = ?, current_agent = ?, workspace_path = ?, workflow_path = ?, error = ?, waiting_reason = ?, waiting_session_id = ? WHERE id = ?`,
+		run.CompletedAt, run.Status, run.CurrentAgent, run.WorkspacePath, run.WorkflowPath, run.Error, run.WaitingReason, run.WaitingSessionID, run.ID,
 	)
 	return err
 }
 
 func (s *Storage) ListRuns(limit int) ([]*models.Run, error) {
 	rows, err := s.db.Query(
-		`SELECT id, created_at, completed_at, initial_prompt, spec_name, workspace_path, status, current_agent, spec_path, error, waiting_reason, waiting_session_id
+		`SELECT id, created_at, completed_at, initial_prompt, workflow_name, workspace_path, status, current_agent, workflow_path, error, waiting_reason, waiting_session_id
 		 FROM runs ORDER BY created_at DESC LIMIT ?`, limit,
 	)
 	if err != nil {
@@ -163,11 +165,11 @@ func (s *Storage) ListRuns(limit int) ([]*models.Run, error) {
 	for rows.Next() {
 		var run models.Run
 		var completedAt sql.NullTime
-		var currentAgent, specPath, runError, waitingReason, waitingSessionID sql.NullString
+		var currentAgent, workflowPath, runError, waitingReason, waitingSessionID sql.NullString
 
 		err := rows.Scan(
 			&run.ID, &run.CreatedAt, &completedAt, &run.InitialPrompt,
-			&run.SpecName, &run.WorkspacePath, &run.Status, &currentAgent, &specPath, &runError,
+			&run.WorkflowName, &run.WorkspacePath, &run.Status, &currentAgent, &workflowPath, &runError,
 			&waitingReason, &waitingSessionID,
 		)
 		if err != nil {
@@ -180,8 +182,8 @@ func (s *Storage) ListRuns(limit int) ([]*models.Run, error) {
 		if currentAgent.Valid {
 			run.CurrentAgent = currentAgent.String
 		}
-		if specPath.Valid {
-			run.SpecPath = specPath.String
+		if workflowPath.Valid {
+			run.WorkflowPath = workflowPath.String
 		}
 		if runError.Valid {
 			run.Error = runError.String
@@ -434,7 +436,7 @@ func (s *Storage) GetWaitingExecutionForRun(runID int64) (*models.Execution, err
 // ListWaitingRuns returns runs that are waiting for human input
 func (s *Storage) ListWaitingRuns() ([]*models.Run, error) {
 	rows, err := s.db.Query(
-		`SELECT id, created_at, completed_at, initial_prompt, spec_name, workspace_path, status, current_agent, spec_path, error, waiting_reason, waiting_session_id
+		`SELECT id, created_at, completed_at, initial_prompt, workflow_name, workspace_path, status, current_agent, workflow_path, error, waiting_reason, waiting_session_id
 		 FROM runs WHERE status = ? ORDER BY created_at DESC`,
 		models.RunStatusWaitingHuman,
 	)
@@ -447,11 +449,11 @@ func (s *Storage) ListWaitingRuns() ([]*models.Run, error) {
 	for rows.Next() {
 		var run models.Run
 		var completedAt sql.NullTime
-		var currentAgent, specPath, runError, waitingReason, waitingSessionID sql.NullString
+		var currentAgent, workflowPath, runError, waitingReason, waitingSessionID sql.NullString
 
 		err := rows.Scan(
 			&run.ID, &run.CreatedAt, &completedAt, &run.InitialPrompt,
-			&run.SpecName, &run.WorkspacePath, &run.Status, &currentAgent, &specPath, &runError,
+			&run.WorkflowName, &run.WorkspacePath, &run.Status, &currentAgent, &workflowPath, &runError,
 			&waitingReason, &waitingSessionID,
 		)
 		if err != nil {
@@ -464,8 +466,8 @@ func (s *Storage) ListWaitingRuns() ([]*models.Run, error) {
 		if currentAgent.Valid {
 			run.CurrentAgent = currentAgent.String
 		}
-		if specPath.Valid {
-			run.SpecPath = specPath.String
+		if workflowPath.Valid {
+			run.WorkflowPath = workflowPath.String
 		}
 		if runError.Valid {
 			run.Error = runError.String

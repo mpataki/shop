@@ -18,11 +18,11 @@ type Run struct {
 	CreatedAt        time.Time
 	CompletedAt      *time.Time
 	InitialPrompt    string
-	SpecName         string
+	WorkflowName     string
 	WorkspacePath    string
 	Status           RunStatus
 	CurrentAgent     string
-	SpecPath         string // path to .lua spec file (for Lua workflows)
+	WorkflowPath     string // path to .lua workflow file
 	Error            string // error message if run failed
 	WaitingReason    string // reason for NEEDS_HUMAN or pause() (when Status == waiting_human)
 	WaitingSessionID string // Claude session ID to resume (when Status == waiting_human)

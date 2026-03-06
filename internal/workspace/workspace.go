@@ -15,7 +15,7 @@ type Workspace struct {
 
 type RunMetadata struct {
 	RunID          int64    `json:"run_id"`
-	SpecName       string   `json:"spec_name"`
+	WorkflowName   string   `json:"workflow_name"`
 	InitialPrompt  string   `json:"initial_prompt"`
 	CurrentAgent   string   `json:"current_agent"`
 	Iteration      int      `json:"iteration"`
@@ -163,9 +163,9 @@ func (w *Workspace) CreateAgentScratchpad(agentName string) error {
 	return os.MkdirAll(path, 0755)
 }
 
-func (w *Workspace) InitContext(specName, prompt string) error {
+func (w *Workspace) InitContext(workflowName, prompt string) error {
 	path := filepath.Join(w.RepoPath, ".agents", "context.md")
-	content := fmt.Sprintf("# Run Context\n\n**Workflow:** %s\n\n**Task:** %s\n\n---\n\n", specName, prompt)
+	content := fmt.Sprintf("# Run Context\n\n**Workflow:** %s\n\n**Task:** %s\n\n---\n\n", workflowName, prompt)
 	return os.WriteFile(path, []byte(content), 0644)
 }
 

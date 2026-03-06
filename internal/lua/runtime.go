@@ -275,7 +275,7 @@ func (r *Runtime) runAgent(agent, prompt string, exec *models.Execution) (map[st
 	// Write run metadata
 	meta := &workspace.RunMetadata{
 		RunID:         r.run.ID,
-		SpecName:      r.run.SpecName,
+		WorkflowName:  r.run.WorkflowName,
 		InitialPrompt: r.run.InitialPrompt,
 		CurrentAgent:  agent,
 		Iteration:     r.callIndex,
@@ -412,7 +412,7 @@ func (r *Runtime) buildAgentPrompt(agent, prompt string) string {
 		result += "IMPORTANT: Read `.agents/context.md` for context from previous agents before starting work."
 	}
 
-	result += fmt.Sprintf("\n\nYou are the '%s' agent in the '%s' workflow.", agent, r.run.SpecName)
+	result += fmt.Sprintf("\n\nYou are the '%s' agent in the '%s' workflow.", agent, r.run.WorkflowName)
 
 	// Add signal file instructions
 	result += "\n\n---\n"
@@ -672,7 +672,7 @@ func (r *Runtime) runCheckpoint(message string) (map[string]any, error) {
 	// Write run metadata
 	meta := &workspace.RunMetadata{
 		RunID:         r.run.ID,
-		SpecName:      r.run.SpecName,
+		WorkflowName:  r.run.WorkflowName,
 		InitialPrompt: r.run.InitialPrompt,
 		CurrentAgent:  agent,
 		Iteration:     r.callIndex,
@@ -803,7 +803,7 @@ func (r *Runtime) GetLogs() []string {
 	return r.logs
 }
 
-// IsLuaSpec checks if a file is a Lua spec
-func IsLuaSpec(path string) bool {
+// IsWorkflow checks if a file is a Lua workflow
+func IsWorkflow(path string) bool {
 	return filepath.Ext(path) == ".lua"
 }

@@ -28,12 +28,12 @@ func New(store *storage.Storage, workspaceDir string) *Orchestrator {
 }
 
 // StartRun creates a new run for a Lua workflow
-func (o *Orchestrator) StartRun(specPath, specName, prompt, sourceRepo string) (*models.Run, error) {
+func (o *Orchestrator) StartRun(workflowPath, workflowName, prompt, sourceRepo string) (*models.Run, error) {
 	// Create run record
 	run := &models.Run{
 		InitialPrompt: prompt,
-		SpecName:      specName,
-		SpecPath:      specPath,
+		WorkflowName:  workflowName,
+		WorkflowPath:  workflowPath,
 		Status:        models.RunStatusPending,
 	}
 
@@ -55,7 +55,7 @@ func (o *Orchestrator) StartRun(specPath, specName, prompt, sourceRepo string) (
 	}
 
 	// Initialize context file
-	if err := ws.InitContext(specName, prompt); err != nil {
+	if err := ws.InitContext(workflowName, prompt); err != nil {
 		return nil, fmt.Errorf("failed to initialize context: %w", err)
 	}
 
@@ -77,7 +77,7 @@ func (o *Orchestrator) Execute(run *models.Run) error {
 
 	// Create and execute the Lua runtime
 	runtime := shopLua.NewRuntime(o.storage, run, ws)
-	err = runtime.Execute(run.SpecPath, run.InitialPrompt)
+	err = runtime.Execute(run.WorkflowPath, run.InitialPrompt)
 
 	// Log any messages from the workflow
 	for _, log := range runtime.GetLogs() {
@@ -111,7 +111,7 @@ func (o *Orchestrator) Resume(runID int64) error {
 		return fmt.Errorf("failed to get run: %w", err)
 	}
 
-	if run.SpecPath == "" {
+	if run.WorkflowPath == "" {
 		return fmt.Errorf("run %d is not a Lua workflow", runID)
 	}
 

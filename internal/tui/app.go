@@ -10,8 +10,10 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/mpataki/shop/internal/config"
 	"github.com/mpataki/shop/internal/models"
 	"github.com/mpataki/shop/internal/orchestrator"
 )
@@ -27,6 +29,7 @@ const (
 
 type App struct {
 	orchestrator *orchestrator.Orchestrator
+	config       *config.Config
 
 	view            View
 	runs            []*models.Run
@@ -36,15 +39,28 @@ type App struct {
 	selectedExecIdx int
 	outputContent   string
 
+	// New run view state
+	workflows           []config.WorkflowInfo
+	selectedWorkflowIdx int
+	promptInput         textinput.Model
+	focusOnPrompt       bool // false = workflow list, true = prompt input
+
 	width  int
 	height int
 	err    error
 }
 
-func NewApp(orch *orchestrator.Orchestrator) *App {
+func NewApp(orch *orchestrator.Orchestrator, cfg *config.Config) *App {
+	ti := textinput.New()
+	ti.Placeholder = "Enter your prompt..."
+	ti.CharLimit = 500
+	ti.Width = 60
+
 	return &App{
 		orchestrator: orch,
+		config:       cfg,
 		view:         ViewRunList,
+		promptInput:  ti,
 	}
 }
 
@@ -142,6 +158,27 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.view = ViewOutput
 		}
 		return a, nil
+
+	case workflowsLoadedMsg:
+		a.workflows = msg.workflows
+		a.err = msg.err
+		if msg.err == nil {
+			a.view = ViewNewRun
+			a.selectedWorkflowIdx = 0
+			a.focusOnPrompt = false
+			a.promptInput.SetValue("")
+			a.promptInput.Blur()
+		}
+		return a, nil
+
+	case runStartedMsg:
+		if msg.err != nil {
+			a.err = msg.err
+		} else {
+			// Return to run list and reload
+			a.view = ViewRunList
+		}
+		return a, a.loadRuns
 	}
 
 	return a, nil
@@ -182,7 +219,7 @@ func (a *App) handleRunListKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 
 	case "n":
-		a.view = ViewNewRun
+		return a, a.enterNewRunView()
 
 	case "r":
 		return a, a.loadRuns
@@ -279,12 +316,59 @@ func (a *App) handleOutputKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (a *App) handleNewRunKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// If focused on prompt, handle text input first
+	if a.focusOnPrompt {
+		switch msg.String() {
+		case "esc":
+			// Blur prompt and go back to workflow selection
+			a.focusOnPrompt = false
+			a.promptInput.Blur()
+			return a, nil
+
+		case "ctrl+c":
+			return a, tea.Quit
+
+		case "enter":
+			// Start the run if we have a prompt
+			if a.promptInput.Value() != "" && len(a.workflows) > 0 {
+				return a, a.startNewRun()
+			}
+			return a, nil
+
+		default:
+			// Pass to text input
+			var cmd tea.Cmd
+			a.promptInput, cmd = a.promptInput.Update(msg)
+			return a, cmd
+		}
+	}
+
+	// Workflow list navigation
 	switch msg.String() {
 	case "esc":
 		a.view = ViewRunList
+		return a, nil
 
 	case "ctrl+c":
 		return a, tea.Quit
+
+	case "up", "k":
+		if a.selectedWorkflowIdx > 0 {
+			a.selectedWorkflowIdx--
+		}
+
+	case "down", "j":
+		if a.selectedWorkflowIdx < len(a.workflows)-1 {
+			a.selectedWorkflowIdx++
+		}
+
+	case "enter", "tab":
+		// Focus on prompt input
+		if len(a.workflows) > 0 {
+			a.focusOnPrompt = true
+			a.promptInput.Focus()
+			return a, textinput.Blink
+		}
 	}
 
 	return a, nil
@@ -378,7 +462,7 @@ func (a *App) formatRunLine(run *models.Run) string {
 	status := a.formatStatus(run.Status)
 	age := a.formatAge(run.CreatedAt)
 	prompt := truncate(run.InitialPrompt, 35)
-	return fmt.Sprintf("#%-3d %-18s %s  %-6s  %s", run.ID, run.SpecName, status, age, prompt)
+	return fmt.Sprintf("#%-3d %-18s %s  %-6s  %s", run.ID, run.WorkflowName, status, age, prompt)
 }
 
 func (a *App) formatAge(t time.Time) string {
@@ -421,7 +505,7 @@ func (a *App) viewRunDetail() string {
 	run := a.selectedRun
 
 	// Header with status badge
-	header := fmt.Sprintf("Run #%d: %s", run.ID, run.SpecName)
+	header := fmt.Sprintf("Run #%d: %s", run.ID, run.WorkflowName)
 	s := titleStyle.Render(header) + "  " + a.formatStatus(run.Status) + "\n\n"
 
 	// Full prompt
@@ -540,11 +624,61 @@ func (a *App) formatSignalStatus(status string) string {
 func (a *App) viewNewRun() string {
 	s := titleStyle.Render("New Run") + "\n\n"
 
-	s += "Use the CLI to start a new run:\n\n"
-	s += "  shop run <spec> <prompt>\n\n"
-	s += "Specs are Lua files in .shop/specs/ or ~/.shop/specs/\n"
+	if a.err != nil {
+		s += fmt.Sprintf("Error: %v\n\n", a.err)
+	}
 
-	s += "\n" + helpStyle.Render("[esc] cancel")
+	// Workflow selection
+	s += "Select Workflow\n"
+	s += "───────────────\n"
+
+	if len(a.workflows) == 0 {
+		s += dimStyle.Render("No workflows found in .shop/workflows/ or ~/.shop/workflows/") + "\n"
+	} else {
+		for i, wf := range a.workflows {
+			line := wf.Name
+			if wf.Source == "user" {
+				line += dimStyle.Render(" (user)")
+			}
+
+			if i == a.selectedWorkflowIdx {
+				if !a.focusOnPrompt {
+					line = selectedStyle.Render("▶ " + line)
+				} else {
+					line = "▶ " + line
+				}
+			} else {
+				line = "  " + line
+			}
+			s += line + "\n"
+		}
+	}
+
+	s += "\n"
+
+	// Prompt input
+	s += "Prompt\n"
+	s += "──────\n"
+
+	if a.focusOnPrompt {
+		s += a.promptInput.View() + "\n"
+	} else {
+		// Show placeholder when not focused
+		if a.promptInput.Value() == "" {
+			s += dimStyle.Render("Press Enter or Tab to enter prompt...") + "\n"
+		} else {
+			s += a.promptInput.Value() + "\n"
+		}
+	}
+
+	s += "\n"
+
+	// Help text
+	if a.focusOnPrompt {
+		s += helpStyle.Render("[enter] start run  [esc] back to workflow  [ctrl+c] quit")
+	} else {
+		s += helpStyle.Render("[↑/↓] select  [enter/tab] edit prompt  [esc] cancel  [ctrl+c] quit")
+	}
 
 	return s
 }
@@ -599,6 +733,16 @@ type runStoppedMsg struct {
 type outputLoadedMsg struct {
 	content string
 	err     error
+}
+
+type workflowsLoadedMsg struct {
+	workflows []config.WorkflowInfo
+	err       error
+}
+
+type runStartedMsg struct {
+	runID int64
+	err   error
 }
 
 // Commands
@@ -754,4 +898,40 @@ func formatDuration(d time.Duration) string {
 	h := int(d.Hours())
 	m := int(d.Minutes()) % 60
 	return fmt.Sprintf("%dh%dm", h, m)
+}
+
+// enterNewRunView loads workflows and switches to the new run view
+func (a *App) enterNewRunView() tea.Cmd {
+	return func() tea.Msg {
+		workflows, err := a.config.ListWorkflows()
+		return workflowsLoadedMsg{workflows: workflows, err: err}
+	}
+}
+
+// startNewRun creates and starts a new workflow run
+func (a *App) startNewRun() tea.Cmd {
+	return func() tea.Msg {
+		if a.selectedWorkflowIdx >= len(a.workflows) {
+			return runStartedMsg{err: fmt.Errorf("no workflow selected")}
+		}
+
+		wf := a.workflows[a.selectedWorkflowIdx]
+		prompt := a.promptInput.Value()
+
+		// Get current working directory for the repo
+		cwd, err := os.Getwd()
+		if err != nil {
+			return runStartedMsg{err: fmt.Errorf("failed to get working directory: %w", err)}
+		}
+
+		run, err := a.orchestrator.StartRun(wf.Path, wf.Name, prompt, cwd)
+		if err != nil {
+			return runStartedMsg{err: err}
+		}
+
+		// Execute the run in background
+		go a.orchestrator.Execute(run)
+
+		return runStartedMsg{runID: run.ID}
+	}
 }
