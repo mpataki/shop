@@ -178,7 +178,7 @@ func (r *Runtime) luaRun(L *lua.LState) int {
 			// Already completed - return cached signal
 			signal = exec.OutputSignal
 			if signal == nil {
-				signal = map[string]any{"status": "ERROR", "reason": "no signal in cache"}
+				signal = map[string]any{"status": string(models.SignalError), "reason": "no signal in cache"}
 			}
 		} else if exec.Status == models.ExecStatusRunning || exec.Status == models.ExecStatusWaitingHuman {
 			// Was in progress or waiting for human - check if agent finished
@@ -309,7 +309,7 @@ func (r *Runtime) runAgent(agent, prompt string, exec *models.Execution) (map[st
 	if err != nil {
 		exec.Status = models.ExecStatusFailed
 		r.storage.UpdateExecution(exec)
-		return map[string]any{"status": "ERROR", "reason": fmt.Sprintf("agent execution failed: %v", err)}, nil
+		return map[string]any{"status": string(models.SignalError), "reason": fmt.Sprintf("agent execution failed: %v", err)}, nil
 	}
 
 	// Read signal
@@ -317,7 +317,7 @@ func (r *Runtime) runAgent(agent, prompt string, exec *models.Execution) (map[st
 	if err != nil {
 		exec.Status = models.ExecStatusFailed
 		r.storage.UpdateExecution(exec)
-		return map[string]any{"status": "ERROR", "reason": fmt.Sprintf("no signal produced: %v", err)}, nil
+		return map[string]any{"status": string(models.SignalError), "reason": fmt.Sprintf("no signal produced: %v", err)}, nil
 	}
 
 	// Update execution with results
@@ -334,7 +334,7 @@ func (r *Runtime) runAgent(agent, prompt string, exec *models.Execution) (map[st
 	r.emit(models.Event{Type: models.EventAgentCompleted, RunID: r.run.ID, Agent: agent})
 
 	// Check for NEEDS_HUMAN signal
-	if status, ok := signal["status"].(string); ok && status == "NEEDS_HUMAN" {
+	if status, ok := signal["status"].(string); ok && status == string(models.SignalNeedsHuman) {
 		// Mark execution as waiting
 		exec.Status = models.ExecStatusWaitingHuman
 		if err := r.storage.UpdateExecution(exec); err != nil {
@@ -374,7 +374,7 @@ func (r *Runtime) recoverExecution(exec *models.Execution) (map[string]any, erro
 	if err == nil {
 		// Signal exists - check if status has changed from NEEDS_HUMAN
 		if status, ok := signal["status"].(string); ok {
-			if status == "NEEDS_HUMAN" {
+			if status == string(models.SignalNeedsHuman) {
 				// Still waiting for human - suspend again
 				r.waitingHuman = true
 				r.waitingSessionID = exec.ClaudeSessionID
@@ -498,7 +498,7 @@ func (r *Runtime) luaPause(L *lua.LState) int {
 			// Still waiting - check if signal changed
 			signal, err := r.ws.ReadSignal("_checkpoint")
 			if err == nil {
-				if status, ok := signal["status"].(string); ok && status != "NEEDS_HUMAN" {
+				if status, ok := signal["status"].(string); ok && status != string(models.SignalNeedsHuman) {
 					// Human responded - complete the execution
 					completedAt := time.Now()
 					exec.CompletedAt = &completedAt
@@ -542,7 +542,7 @@ func (r *Runtime) pauseResultFromSignal(L *lua.LState, signal map[string]any) in
 	tbl := L.NewTable()
 
 	status, _ := signal["status"].(string)
-	if status == "CONTINUE" {
+	if status == string(models.SignalContinue) {
 		L.SetField(tbl, "continue", lua.LBool(true))
 	} else {
 		L.SetField(tbl, "continue", lua.LBool(false))
@@ -634,7 +634,7 @@ func (r *Runtime) runCheckpoint(message string) (map[string]any, error) {
 	if err != nil {
 		// No signal yet - write initial NEEDS_HUMAN signal
 		signal = map[string]any{
-			"status": "NEEDS_HUMAN",
+			"status": string(models.SignalNeedsHuman),
 			"reason": message,
 		}
 		if err := r.ws.WriteSignal(agent, signal); err != nil {
@@ -643,7 +643,7 @@ func (r *Runtime) runCheckpoint(message string) (map[string]any, error) {
 	}
 
 	// Check if waiting for human
-	if status, ok := signal["status"].(string); ok && status == "NEEDS_HUMAN" {
+	if status, ok := signal["status"].(string); ok && status == string(models.SignalNeedsHuman) {
 		// Mark execution as waiting
 		exec.ClaudeSessionID = sessionID
 		exec.Status = models.ExecStatusWaitingHuman

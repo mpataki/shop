@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+
+	"github.com/mpataki/shop/internal/models"
 )
 
 // Server implements a minimal MCP server over stdio.
@@ -105,7 +107,7 @@ func (s *Server) handleToolsList() map[string]any {
 					"properties": map[string]any{
 						"status": map[string]any{
 							"type":        "string",
-							"enum":        []string{"DONE", "BLOCKED", "NEEDS_HUMAN", "APPROVED", "CHANGES_REQUESTED", "CONTINUE", "STOP"},
+							"enum":        models.ValidAgentStatusStrings(),
 							"description": "Your completion status",
 						},
 						"summary": map[string]any{
@@ -138,6 +140,13 @@ func (s *Server) handleToolsCall(params json.RawMessage) map[string]any {
 		return toolError("unknown tool: " + call.Name)
 	}
 
+	// Validate status
+	statusStr, _ := call.Arguments["status"].(string)
+	status := models.SignalStatus(statusStr)
+	if !status.IsValid() {
+		return toolError(fmt.Sprintf("invalid status %q, must be one of: %v", statusStr, models.ValidAgentStatusStrings()))
+	}
+
 	// Write signal to disk
 	data, err := json.MarshalIndent(call.Arguments, "", "  ")
 	if err != nil {
@@ -149,7 +158,6 @@ func (s *Server) handleToolsCall(params json.RawMessage) map[string]any {
 		return toolError("failed to write signal: " + err.Error())
 	}
 
-	status, _ := call.Arguments["status"].(string)
 	return map[string]any{
 		"content": []map[string]any{
 			{

@@ -6,6 +6,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
+
+	"github.com/mpataki/shop/internal/models"
 )
 
 type Workspace struct {
@@ -194,10 +197,7 @@ func (w *Workspace) AppendContext(agentName string, signal map[string]any) error
 
 func (w *Workspace) writeSkillFile() error {
 	skillPath := filepath.Join(w.RepoPath, ".agents", "SKILL.md")
-	return os.WriteFile(skillPath, []byte(skillContent), 0644)
-}
-
-const skillContent = `---
+	content := fmt.Sprintf(`---
 name: shop-protocol
 description: Protocol for multi-agent orchestrated workflows. Use when .agents/ directory exists.
 ---
@@ -209,25 +209,27 @@ codebase before and after you.
 
 ## Reading Context
 
-1. Read ` + "`" + `.agents/context.md` + "`" + ` for the task description and notes from previous agents
-2. Check ` + "`" + `.shop/run.json` + "`" + ` for run metadata if needed
+1. Read %[1]s.agents/context.md%[1]s for the task description and notes from previous agents
+2. Check %[1]s.shop/run.json%[1]s for run metadata if needed
 
 ## Signaling Completion
 
-**IMPORTANT:** When your work is complete, call the ` + "`" + `report_signal` + "`" + ` tool.
+**IMPORTANT:** When your work is complete, call the %[1]sreport_signal%[1]s tool.
 
-Include a ` + "`" + `summary` + "`" + ` with key information for the next agent. Example:
+Include a %[1]ssummary%[1]s with key information for the next agent. Example:
 
-` + "`" + `report_signal(status="DONE", summary="Implemented feature X. Note: Y needs attention.")` + "`" + `
+%[1]sreport_signal(status="DONE", summary="Implemented feature X. Note: Y needs attention.")%[1]s
 
-Valid statuses: DONE, BLOCKED, NEEDS_HUMAN, APPROVED, CHANGES_REQUESTED
+Valid statuses: %s
 
 ## Private Workspace
 
-Use ` + "`" + `.agents/scratchpad/{your-role}/` + "`" + ` for drafts or intermediate work.
+Use %[1]s.agents/scratchpad/{your-role}/%[1]s for drafts or intermediate work.
 
 ## Git Commits
 
 Make atomic commits with clear messages. The commit history is part of
 the communication trail.
-`
+`, "`", strings.Join(models.ValidAgentStatusStrings(), ", "))
+	return os.WriteFile(skillPath, []byte(content), 0644)
+}

@@ -631,14 +631,14 @@ func (a *App) viewRunDetail() string {
 }
 
 func (a *App) formatSignalStatus(status string) string {
-	switch status {
-	case "APPROVED", "DONE", "CONTINUE":
+	switch models.SignalStatus(status) {
+	case models.SignalApproved, models.SignalDone, models.SignalContinue:
 		return signalApproved.Render(status)
-	case "CHANGES_REQUESTED":
+	case models.SignalChangesRequested:
 		return signalChanges.Render(status)
-	case "BLOCKED", "STOP":
+	case models.SignalBlocked, models.SignalStop:
 		return signalBlocked.Render(status)
-	case "NEEDS_HUMAN":
+	case models.SignalNeedsHuman:
 		return signalNeedsHuman.Render(status)
 	default:
 		return status

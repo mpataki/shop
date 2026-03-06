@@ -1,6 +1,11 @@
 package lua
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+
+	"github.com/mpataki/shop/internal/models"
+)
 
 // buildAgentPrompt constructs the prompt for a regular agent invocation.
 func (r *Runtime) buildAgentPrompt(agent, prompt string) string {
@@ -19,7 +24,7 @@ func (r *Runtime) buildAgentPrompt(agent, prompt string) string {
 
 	result += "\n\n---\n"
 	result += "IMPORTANT: When you have completed your task, you MUST call the `report_signal` tool to report your status.\n"
-	result += "Valid statuses: DONE, BLOCKED, NEEDS_HUMAN, APPROVED, CHANGES_REQUESTED\n"
+	result += "Valid statuses: " + strings.Join(models.ValidAgentStatusStrings(), ", ") + "\n"
 
 	return result
 }
@@ -36,8 +41,9 @@ func (r *Runtime) buildCheckpointPrompt(message string) string {
 3. Decide whether to continue or stop
 
 When ready, call the report_signal tool with your decision:
-- To continue: report_signal(status="CONTINUE", summary="your note")
-- To stop: report_signal(status="STOP", summary="reason for stopping")
+- To continue: report_signal(status="%s", summary="your note")
+- To stop: report_signal(status="%s", summary="reason for stopping")
 
-Wait for the human to provide guidance before reporting your decision.`, message)
+Wait for the human to provide guidance before reporting your decision.`,
+		message, models.SignalContinue, models.SignalStop)
 }
