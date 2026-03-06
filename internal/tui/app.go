@@ -149,7 +149,11 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.err = msg.err
 		}
 		a.view = ViewRunList
-		return a, a.loadRuns
+		cmds := []tea.Cmd{a.loadRuns}
+		if msg.runID > 0 {
+			cmds = append(cmds, a.tryResumeAfterHuman(msg.runID))
+		}
+		return a, tea.Batch(cmds...)
 
 	case runDeletedMsg:
 		a.err = msg.err
@@ -248,7 +252,7 @@ func (a *App) handleRunListKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if len(a.runs) > 0 && a.selectedIdx < len(a.runs) {
 			run := a.runs[a.selectedIdx]
 			if run.Status == models.RunStatusWaitingHuman && run.WaitingSessionID != "" {
-				return a, a.continueSession(run.WaitingSessionID, run.WorkspacePath+"/repo")
+				return a, a.continueSession(run.ID, run.WaitingSessionID, run.WorkspacePath+"/repo")
 			}
 		}
 	}
@@ -297,7 +301,7 @@ func (a *App) handleRunDetailKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if a.selectedRun != nil && a.selectedRun.Status == models.RunStatusWaitingHuman {
 			if a.selectedRun.WaitingSessionID != "" {
 				workDir := a.selectedRun.WorkspacePath + "/repo"
-				return a, a.continueSession(a.selectedRun.WaitingSessionID, workDir)
+				return a, a.continueSession(a.selectedRun.ID, a.selectedRun.WaitingSessionID, workDir)
 			}
 		}
 	case "s":
@@ -383,6 +387,7 @@ type runKilledMsg struct {
 
 type sessionResumedMsg struct {
 	sessionID string
+	runID     int64 // non-zero if this was a continue session (triggers auto-resume)
 	err       error
 }
 
@@ -464,12 +469,19 @@ func (a *App) resumeSession(sessionID string, workDir string) tea.Cmd {
 	})
 }
 
-func (a *App) continueSession(sessionID string, workDir string) tea.Cmd {
+func (a *App) continueSession(runID int64, sessionID string, workDir string) tea.Cmd {
 	cmd := exec.Command("claude", "--resume", sessionID)
 	cmd.Dir = workDir
 	return tea.ExecProcess(cmd, func(err error) tea.Msg {
-		return sessionResumedMsg{sessionID: sessionID, err: err}
+		return sessionResumedMsg{sessionID: sessionID, runID: runID, err: err}
 	})
+}
+
+func (a *App) tryResumeAfterHuman(runID int64) tea.Cmd {
+	return func() tea.Msg {
+		a.orchestrator.TryResumeAfterHuman(runID)
+		return nil // events drive TUI updates
+	}
 }
 
 func (a *App) loadOutput(sessionID string, workspacePath string) tea.Cmd {

@@ -305,6 +305,34 @@ func (o *Orchestrator) StopRun(runID int64, reason string) error {
 	return nil
 }
 
+// TryResumeAfterHuman checks if a waiting run's signal changed and auto-resumes if so.
+// Returns nil (no-op) if the run isn't waiting or the signal hasn't changed.
+func (o *Orchestrator) TryResumeAfterHuman(runID int64) error {
+	run, err := o.storage.GetRun(runID)
+	if err != nil || run.Status != models.RunStatusWaitingHuman {
+		return nil
+	}
+
+	ws, err := workspace.Open(o.workspaceDir, runID)
+	if err != nil {
+		return nil
+	}
+
+	signal, err := ws.ReadSignal(run.CurrentAgent)
+	if err != nil {
+		return nil
+	}
+
+	status, _ := signal["status"].(string)
+	if status == string(models.SignalNeedsHuman) {
+		return nil
+	}
+
+	// Resume in background so caller isn't blocked
+	go o.Resume(runID)
+	return nil
+}
+
 // ListWaitingRuns returns runs that are waiting for human input
 func (o *Orchestrator) ListWaitingRuns() ([]*models.Run, error) {
 	return o.storage.ListWaitingRuns()
