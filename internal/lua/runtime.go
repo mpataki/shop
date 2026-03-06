@@ -1,11 +1,8 @@
 package lua
 
 import (
-	"encoding/json"
 	"fmt"
-	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"time"
 
@@ -399,88 +396,6 @@ func (r *Runtime) recoverExecution(exec *models.Execution) (map[string]any, erro
 	return r.runAgent(exec.AgentName, exec.Prompt, exec)
 }
 
-// buildAgentPrompt constructs the prompt for the agent
-func (r *Runtime) buildAgentPrompt(agent, prompt string) string {
-	result := prompt
-	if result == "" {
-		result = r.run.InitialPrompt
-	}
-
-	// Direct agent to read context file for history
-	if r.callIndex > 1 {
-		result += "\n\n---\n"
-		result += "IMPORTANT: Read `.agents/context.md` for context from previous agents before starting work."
-	}
-
-	result += fmt.Sprintf("\n\nYou are the '%s' agent in the '%s' workflow.", agent, r.run.WorkflowName)
-
-	// Add signal file instructions
-	result += "\n\n---\n"
-	result += "IMPORTANT: When you have completed your task, you MUST write a JSON signal file.\n\n"
-	result += "Write to: .agents/signals/" + agent + ".json\n\n"
-	result += "Example:\n```json\n{\"status\": \"DONE\", \"summary\": \"Completed the task.\"}\n```\n"
-
-	return result
-}
-
-// runClaude executes the Claude CLI
-func (r *Runtime) runClaude(agent, prompt string, execID int64) (sessionID string, exitCode int, err error) {
-	args := []string{
-		"-p", prompt,
-		"--output-format", "json",
-		"--dangerously-skip-permissions",
-		"--max-turns", "10",
-	}
-
-	if agent != "" {
-		args = append([]string{"--agent", agent}, args...)
-	}
-
-	cmd := exec.Command("claude", args...)
-	cmd.Dir = r.ws.RepoPath
-
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		return "", 0, err
-	}
-
-	if err := cmd.Start(); err != nil {
-		return "", 0, err
-	}
-
-	// Store PID
-	if cmd.Process != nil {
-		r.storage.UpdateExecutionPID(execID, cmd.Process.Pid)
-	}
-
-	// Read output
-	output, _ := io.ReadAll(stdout)
-
-	// Wait for completion
-	err = cmd.Wait()
-	exitCode = 0
-	if cmd.ProcessState != nil {
-		exitCode = cmd.ProcessState.ExitCode()
-	}
-
-	if err != nil {
-		if exitErr, ok := err.(*exec.ExitError); ok {
-			exitCode = exitErr.ExitCode()
-		} else {
-			return "", 0, err
-		}
-	}
-
-	// Parse session ID from JSON output
-	var result struct {
-		SessionID string `json:"session_id"`
-	}
-	if err := json.Unmarshal(output, &result); err == nil {
-		sessionID = result.SessionID
-	}
-
-	return sessionID, exitCode, nil
-}
 
 // signalToTable converts a Go map to a Lua table
 func (r *Runtime) signalToTable(L *lua.LState, signal map[string]any) *lua.LTable {
@@ -745,29 +660,6 @@ func (r *Runtime) runCheckpoint(message string) (map[string]any, error) {
 	return signal, nil
 }
 
-// buildCheckpointPrompt constructs the prompt for a checkpoint agent
-func (r *Runtime) buildCheckpointPrompt(message string) string {
-	prompt := fmt.Sprintf(`The workflow has paused for human input.
-
-**Checkpoint:** %s
-
-**What to do:**
-1. Review the workspace state
-2. Check recent changes and test results
-3. Decide whether to continue or stop
-
-When ready, write your decision to .agents/signals/_checkpoint.json:
-
-To continue:
-` + "```json\n{\"status\": \"CONTINUE\", \"message\": \"Your optional note here\"}\n```" + `
-
-To stop:
-` + "```json\n{\"status\": \"STOP\", \"reason\": \"Reason for stopping\"}\n```" + `
-
-Wait for the human to provide guidance before writing your decision.`, message)
-
-	return prompt
-}
 
 // markComplete marks the run as complete
 func (r *Runtime) markComplete() error {

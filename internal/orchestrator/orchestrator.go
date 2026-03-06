@@ -203,9 +203,13 @@ func (o *Orchestrator) DeleteRun(runID int64) error {
 		cmd.CombinedOutput() // Ignore errors
 	}
 
-	// Remove workspace directory
+	// Move workspace directory to trash
 	if run.WorkspacePath != "" {
-		os.RemoveAll(run.WorkspacePath)
+		trashCmd := exec.Command("trash", run.WorkspacePath)
+		if err := trashCmd.Run(); err != nil {
+			// Fall back to removing if trash is not available
+			os.RemoveAll(run.WorkspacePath)
+		}
 	}
 
 	// Delete from database

@@ -89,33 +89,16 @@ func (s *Storage) migrate() error {
 	return nil
 }
 
-func (s *Storage) CreateRun(run *models.Run) (int64, error) {
-	result, err := s.db.Exec(
-		`INSERT INTO runs (initial_prompt, workflow_name, workspace_path, status, current_agent, workflow_path, error, waiting_reason, waiting_session_id)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		run.InitialPrompt, run.WorkflowName, run.WorkspacePath, run.Status, run.CurrentAgent, run.WorkflowPath, run.Error,
-		run.WaitingReason, run.WaitingSessionID,
-	)
-	if err != nil {
-		return 0, err
-	}
-	return result.LastInsertId()
-}
-
-func (s *Storage) GetRun(id int64) (*models.Run, error) {
-	row := s.db.QueryRow(
-		`SELECT id, created_at, completed_at, initial_prompt, workflow_name, workspace_path, status, current_agent, workflow_path, error, waiting_reason, waiting_session_id
-		 FROM runs WHERE id = ?`, id,
-	)
-
+// scanRun scans a Run from a row, reducing boilerplate across queries.
+func scanRun(scanner interface{ Scan(...any) error }) (*models.Run, error) {
 	var run models.Run
 	var completedAt sql.NullTime
 	var currentAgent, workflowPath, runError, waitingReason, waitingSessionID sql.NullString
 
-	err := row.Scan(
+	err := scanner.Scan(
 		&run.ID, &run.CreatedAt, &completedAt, &run.InitialPrompt,
-		&run.WorkflowName, &run.WorkspacePath, &run.Status, &currentAgent, &workflowPath, &runError,
-		&waitingReason, &waitingSessionID,
+		&run.WorkflowName, &run.WorkspacePath, &run.Status, &currentAgent,
+		&workflowPath, &runError, &waitingReason, &waitingSessionID,
 	)
 	if err != nil {
 		return nil, err
@@ -143,6 +126,77 @@ func (s *Storage) GetRun(id int64) (*models.Run, error) {
 	return &run, nil
 }
 
+const runColumns = `id, created_at, completed_at, initial_prompt, workflow_name, workspace_path, status, current_agent, workflow_path, error, waiting_reason, waiting_session_id`
+
+// scanExecution scans an Execution from a row, reducing boilerplate across queries.
+func scanExecution(scanner interface{ Scan(...any) error }) (*models.Execution, error) {
+	var exec models.Execution
+	var sessionID, signalJSON, prompt sql.NullString
+	var exitCode, pid, callIndex sql.NullInt64
+	var startedAt, completedAt sql.NullTime
+
+	err := scanner.Scan(
+		&exec.ID, &exec.RunID, &exec.AgentName, &sessionID, &exec.Status,
+		&exitCode, &startedAt, &completedAt, &signalJSON, &exec.SequenceNum,
+		&pid, &callIndex, &prompt,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	if sessionID.Valid {
+		exec.ClaudeSessionID = sessionID.String
+	}
+	if exitCode.Valid {
+		code := int(exitCode.Int64)
+		exec.ExitCode = &code
+	}
+	if startedAt.Valid {
+		exec.StartedAt = &startedAt.Time
+	}
+	if completedAt.Valid {
+		exec.CompletedAt = &completedAt.Time
+	}
+	if signalJSON.Valid {
+		var signal map[string]any
+		if err := json.Unmarshal([]byte(signalJSON.String), &signal); err == nil {
+			exec.OutputSignal = signal
+		}
+	}
+	if pid.Valid {
+		p := int(pid.Int64)
+		exec.PID = &p
+	}
+	if callIndex.Valid {
+		exec.CallIndex = int(callIndex.Int64)
+	}
+	if prompt.Valid {
+		exec.Prompt = prompt.String
+	}
+
+	return &exec, nil
+}
+
+const execColumns = `id, run_id, agent_name, claude_session_id, status, exit_code, started_at, completed_at, output_signal, sequence_num, pid, call_index, prompt`
+
+func (s *Storage) CreateRun(run *models.Run) (int64, error) {
+	result, err := s.db.Exec(
+		`INSERT INTO runs (initial_prompt, workflow_name, workspace_path, status, current_agent, workflow_path, error, waiting_reason, waiting_session_id)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		run.InitialPrompt, run.WorkflowName, run.WorkspacePath, run.Status, run.CurrentAgent, run.WorkflowPath, run.Error,
+		run.WaitingReason, run.WaitingSessionID,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.LastInsertId()
+}
+
+func (s *Storage) GetRun(id int64) (*models.Run, error) {
+	row := s.db.QueryRow(`SELECT `+runColumns+` FROM runs WHERE id = ?`, id)
+	return scanRun(row)
+}
+
 func (s *Storage) UpdateRun(run *models.Run) error {
 	_, err := s.db.Exec(
 		`UPDATE runs SET completed_at = ?, status = ?, current_agent = ?, workspace_path = ?, workflow_path = ?, error = ?, waiting_reason = ?, waiting_session_id = ? WHERE id = ?`,
@@ -152,10 +206,7 @@ func (s *Storage) UpdateRun(run *models.Run) error {
 }
 
 func (s *Storage) ListRuns(limit int) ([]*models.Run, error) {
-	rows, err := s.db.Query(
-		`SELECT id, created_at, completed_at, initial_prompt, workflow_name, workspace_path, status, current_agent, workflow_path, error, waiting_reason, waiting_session_id
-		 FROM runs ORDER BY created_at DESC LIMIT ?`, limit,
-	)
+	rows, err := s.db.Query(`SELECT `+runColumns+` FROM runs ORDER BY created_at DESC LIMIT ?`, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -163,39 +214,11 @@ func (s *Storage) ListRuns(limit int) ([]*models.Run, error) {
 
 	var runs []*models.Run
 	for rows.Next() {
-		var run models.Run
-		var completedAt sql.NullTime
-		var currentAgent, workflowPath, runError, waitingReason, waitingSessionID sql.NullString
-
-		err := rows.Scan(
-			&run.ID, &run.CreatedAt, &completedAt, &run.InitialPrompt,
-			&run.WorkflowName, &run.WorkspacePath, &run.Status, &currentAgent, &workflowPath, &runError,
-			&waitingReason, &waitingSessionID,
-		)
+		run, err := scanRun(rows)
 		if err != nil {
 			return nil, err
 		}
-
-		if completedAt.Valid {
-			run.CompletedAt = &completedAt.Time
-		}
-		if currentAgent.Valid {
-			run.CurrentAgent = currentAgent.String
-		}
-		if workflowPath.Valid {
-			run.WorkflowPath = workflowPath.String
-		}
-		if runError.Valid {
-			run.Error = runError.String
-		}
-		if waitingReason.Valid {
-			run.WaitingReason = waitingReason.String
-		}
-		if waitingSessionID.Valid {
-			run.WaitingSessionID = waitingSessionID.String
-		}
-
-		runs = append(runs, &run)
+		runs = append(runs, run)
 	}
 
 	return runs, rows.Err()
@@ -213,7 +236,7 @@ func (s *Storage) CreateExecution(exec *models.Execution) (int64, error) {
 	}
 
 	result, err := s.db.Exec(
-		`INSERT INTO executions (run_id, agent_name, claude_session_id, status, exit_code, started_at, completed_at, output_signal, sequence_num, pid, call_index, prompt)
+		`INSERT INTO executions (`+execColumns[4:]+`)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		exec.RunID, exec.AgentName, exec.ClaudeSessionID, exec.Status,
 		exec.ExitCode, exec.StartedAt, exec.CompletedAt, signalJSON, exec.SequenceNum, exec.PID, exec.CallIndex, exec.Prompt,
@@ -226,8 +249,7 @@ func (s *Storage) CreateExecution(exec *models.Execution) (int64, error) {
 
 func (s *Storage) GetExecutionsForRun(runID int64) ([]*models.Execution, error) {
 	rows, err := s.db.Query(
-		`SELECT id, run_id, agent_name, claude_session_id, status, exit_code, started_at, completed_at, output_signal, sequence_num, pid, call_index, prompt
-		 FROM executions WHERE run_id = ? ORDER BY sequence_num`, runID,
+		`SELECT `+execColumns+` FROM executions WHERE run_id = ? ORDER BY sequence_num`, runID,
 	)
 	if err != nil {
 		return nil, err
@@ -236,66 +258,26 @@ func (s *Storage) GetExecutionsForRun(runID int64) ([]*models.Execution, error) 
 
 	var execs []*models.Execution
 	for rows.Next() {
-		var exec models.Execution
-		var sessionID, signalJSON, prompt sql.NullString
-		var exitCode, pid, callIndex sql.NullInt64
-		var startedAt, completedAt sql.NullTime
-
-		err := rows.Scan(
-			&exec.ID, &exec.RunID, &exec.AgentName, &sessionID, &exec.Status,
-			&exitCode, &startedAt, &completedAt, &signalJSON, &exec.SequenceNum, &pid, &callIndex, &prompt,
-		)
+		exec, err := scanExecution(rows)
 		if err != nil {
 			return nil, err
 		}
-
-		if sessionID.Valid {
-			exec.ClaudeSessionID = sessionID.String
-		}
-		if exitCode.Valid {
-			code := int(exitCode.Int64)
-			exec.ExitCode = &code
-		}
-		if startedAt.Valid {
-			exec.StartedAt = &startedAt.Time
-		}
-		if completedAt.Valid {
-			exec.CompletedAt = &completedAt.Time
-		}
-		if signalJSON.Valid {
-			var signal map[string]any
-			if err := json.Unmarshal([]byte(signalJSON.String), &signal); err == nil {
-				exec.OutputSignal = signal
-			}
-		}
-		if pid.Valid {
-			p := int(pid.Int64)
-			exec.PID = &p
-		}
-		if callIndex.Valid {
-			exec.CallIndex = int(callIndex.Int64)
-		}
-		if prompt.Valid {
-			exec.Prompt = prompt.String
-		}
-
-		execs = append(execs, &exec)
+		execs = append(execs, exec)
 	}
 
 	return execs, rows.Err()
 }
 
 func (s *Storage) GetRunningExecutionForRun(runID int64) (*models.Execution, error) {
-	execs, err := s.GetExecutionsForRun(runID)
-	if err != nil {
-		return nil, err
+	row := s.db.QueryRow(
+		`SELECT `+execColumns+` FROM executions WHERE run_id = ? AND status = ? LIMIT 1`,
+		runID, models.ExecStatusRunning,
+	)
+	exec, err := scanExecution(row)
+	if err == sql.ErrNoRows {
+		return nil, nil
 	}
-	for _, exec := range execs {
-		if exec.Status == models.ExecStatusRunning {
-			return exec, nil
-		}
-	}
-	return nil, nil
+	return exec, err
 }
 
 func (s *Storage) UpdateExecutionPID(execID int64, pid int) error {
@@ -339,7 +321,7 @@ func (s *Storage) DeleteRun(id int64) error {
 	return tx.Commit()
 }
 
-// Helper to format time for display
+// FormatTimeAgo formats a time as a human-readable relative string.
 func FormatTimeAgo(t time.Time) string {
 	d := time.Since(t)
 	switch {
@@ -357,57 +339,16 @@ func FormatTimeAgo(t time.Time) string {
 // GetExecutionByCallIndex gets an execution by run_id and call_index (for Lua workflows)
 func (s *Storage) GetExecutionByCallIndex(runID int64, callIndex int) (*models.Execution, error) {
 	row := s.db.QueryRow(
-		`SELECT id, run_id, agent_name, claude_session_id, status, exit_code, started_at, completed_at, output_signal, sequence_num, pid, call_index, prompt
-		 FROM executions WHERE run_id = ? AND call_index = ?`, runID, callIndex,
+		`SELECT `+execColumns+` FROM executions WHERE run_id = ? AND call_index = ?`, runID, callIndex,
 	)
-
-	var exec models.Execution
-	var sessionID, signalJSON, prompt sql.NullString
-	var exitCode, pid, callIdx sql.NullInt64
-	var startedAt, completedAt sql.NullTime
-
-	err := row.Scan(
-		&exec.ID, &exec.RunID, &exec.AgentName, &sessionID, &exec.Status,
-		&exitCode, &startedAt, &completedAt, &signalJSON, &exec.SequenceNum, &pid, &callIdx, &prompt,
-	)
+	exec, err := scanExecution(row)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
 	if err != nil {
-		if err == sql.ErrNoRows {
-			return nil, nil
-		}
 		return nil, err
 	}
-
-	if sessionID.Valid {
-		exec.ClaudeSessionID = sessionID.String
-	}
-	if exitCode.Valid {
-		code := int(exitCode.Int64)
-		exec.ExitCode = &code
-	}
-	if startedAt.Valid {
-		exec.StartedAt = &startedAt.Time
-	}
-	if completedAt.Valid {
-		exec.CompletedAt = &completedAt.Time
-	}
-	if signalJSON.Valid {
-		var signal map[string]any
-		if err := json.Unmarshal([]byte(signalJSON.String), &signal); err == nil {
-			exec.OutputSignal = signal
-		}
-	}
-	if pid.Valid {
-		p := int(pid.Int64)
-		exec.PID = &p
-	}
-	if callIdx.Valid {
-		exec.CallIndex = int(callIdx.Int64)
-	}
-	if prompt.Valid {
-		exec.Prompt = prompt.String
-	}
-
-	return &exec, nil
+	return exec, nil
 }
 
 // InvalidateExecutionsAfterIndex marks all executions after callIndex as failed (for Lua workflow recovery)
@@ -421,23 +362,21 @@ func (s *Storage) InvalidateExecutionsAfterIndex(runID int64, callIndex int) err
 
 // GetWaitingExecutionForRun returns the execution that is waiting for human input
 func (s *Storage) GetWaitingExecutionForRun(runID int64) (*models.Execution, error) {
-	execs, err := s.GetExecutionsForRun(runID)
-	if err != nil {
-		return nil, err
+	row := s.db.QueryRow(
+		`SELECT `+execColumns+` FROM executions WHERE run_id = ? AND status = ? LIMIT 1`,
+		runID, models.ExecStatusWaitingHuman,
+	)
+	exec, err := scanExecution(row)
+	if err == sql.ErrNoRows {
+		return nil, nil
 	}
-	for _, exec := range execs {
-		if exec.Status == models.ExecStatusWaitingHuman {
-			return exec, nil
-		}
-	}
-	return nil, nil
+	return exec, err
 }
 
 // ListWaitingRuns returns runs that are waiting for human input
 func (s *Storage) ListWaitingRuns() ([]*models.Run, error) {
 	rows, err := s.db.Query(
-		`SELECT id, created_at, completed_at, initial_prompt, workflow_name, workspace_path, status, current_agent, workflow_path, error, waiting_reason, waiting_session_id
-		 FROM runs WHERE status = ? ORDER BY created_at DESC`,
+		`SELECT `+runColumns+` FROM runs WHERE status = ? ORDER BY created_at DESC`,
 		models.RunStatusWaitingHuman,
 	)
 	if err != nil {
@@ -447,39 +386,11 @@ func (s *Storage) ListWaitingRuns() ([]*models.Run, error) {
 
 	var runs []*models.Run
 	for rows.Next() {
-		var run models.Run
-		var completedAt sql.NullTime
-		var currentAgent, workflowPath, runError, waitingReason, waitingSessionID sql.NullString
-
-		err := rows.Scan(
-			&run.ID, &run.CreatedAt, &completedAt, &run.InitialPrompt,
-			&run.WorkflowName, &run.WorkspacePath, &run.Status, &currentAgent, &workflowPath, &runError,
-			&waitingReason, &waitingSessionID,
-		)
+		run, err := scanRun(rows)
 		if err != nil {
 			return nil, err
 		}
-
-		if completedAt.Valid {
-			run.CompletedAt = &completedAt.Time
-		}
-		if currentAgent.Valid {
-			run.CurrentAgent = currentAgent.String
-		}
-		if workflowPath.Valid {
-			run.WorkflowPath = workflowPath.String
-		}
-		if runError.Valid {
-			run.Error = runError.String
-		}
-		if waitingReason.Valid {
-			run.WaitingReason = waitingReason.String
-		}
-		if waitingSessionID.Valid {
-			run.WaitingSessionID = waitingSessionID.String
-		}
-
-		runs = append(runs, &run)
+		runs = append(runs, run)
 	}
 
 	return runs, rows.Err()
