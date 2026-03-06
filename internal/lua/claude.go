@@ -2,12 +2,22 @@ package lua
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
+	"os"
 	"os/exec"
+	"path/filepath"
 )
 
 // runClaude executes the Claude CLI and returns the session ID and exit code.
-func (r *Runtime) runClaude(agent, prompt string, execID int64) (sessionID string, exitCode int, err error) {
+// claudeAgent is the --agent flag (agent .md file name, empty for no agent mode).
+// signalAgent is the name used for the MCP signal file.
+func (r *Runtime) runClaude(claudeAgent, signalAgent, prompt string, execID int64) (sessionID string, exitCode int, err error) {
+	// Set up MCP config so the agent can call report_signal
+	if err := r.writeMCPConfig(signalAgent); err != nil {
+		return "", 0, fmt.Errorf("failed to write MCP config: %w", err)
+	}
+
 	args := []string{
 		"-p", prompt,
 		"--output-format", "json",
@@ -15,8 +25,8 @@ func (r *Runtime) runClaude(agent, prompt string, execID int64) (sessionID strin
 		"--max-turns", "10",
 	}
 
-	if agent != "" {
-		args = append([]string{"--agent", agent}, args...)
+	if claudeAgent != "" {
+		args = append([]string{"--agent", claudeAgent}, args...)
 	}
 
 	cmd := exec.Command("claude", args...)
@@ -63,4 +73,34 @@ func (r *Runtime) runClaude(agent, prompt string, execID int64) (sessionID strin
 	}
 
 	return sessionID, exitCode, nil
+}
+
+// writeMCPConfig writes .mcp.json to the workspace so Claude discovers the Shop MCP server.
+func (r *Runtime) writeMCPConfig(signalAgent string) error {
+	shopBin, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("failed to find shop binary: %w", err)
+	}
+	shopBin, err = filepath.EvalSymlinks(shopBin)
+	if err != nil {
+		return fmt.Errorf("failed to resolve shop binary path: %w", err)
+	}
+
+	signalDir := filepath.Join(r.ws.RepoPath, ".agents", "signals")
+
+	mcpConfig := map[string]any{
+		"mcpServers": map[string]any{
+			"shop": map[string]any{
+				"command": shopBin,
+				"args":    []string{"mcp-server", "--agent", signalAgent, "--signal-dir", signalDir},
+			},
+		},
+	}
+
+	data, err := json.MarshalIndent(mcpConfig, "", "  ")
+	if err != nil {
+		return err
+	}
+
+	return os.WriteFile(filepath.Join(r.ws.RepoPath, ".mcp.json"), data, 0644)
 }

@@ -17,11 +17,9 @@ func (r *Runtime) buildAgentPrompt(agent, prompt string) string {
 
 	result += fmt.Sprintf("\n\nYou are the '%s' agent in the '%s' workflow.", agent, r.run.WorkflowName)
 
-	// Add signal file instructions
 	result += "\n\n---\n"
-	result += "IMPORTANT: When you have completed your task, you MUST write a JSON signal file.\n\n"
-	result += "Write to: .agents/signals/" + agent + ".json\n\n"
-	result += "Example:\n```json\n{\"status\": \"DONE\", \"summary\": \"Completed the task.\"}\n```\n"
+	result += "IMPORTANT: When you have completed your task, you MUST call the `report_signal` tool to report your status.\n"
+	result += "Valid statuses: DONE, BLOCKED, NEEDS_HUMAN, APPROVED, CHANGES_REQUESTED\n"
 
 	return result
 }
@@ -37,13 +35,9 @@ func (r *Runtime) buildCheckpointPrompt(message string) string {
 2. Check recent changes and test results
 3. Decide whether to continue or stop
 
-When ready, write your decision to .agents/signals/_checkpoint.json:
+When ready, call the report_signal tool with your decision:
+- To continue: report_signal(status="CONTINUE", summary="your note")
+- To stop: report_signal(status="STOP", summary="reason for stopping")
 
-To continue:
-`+"```json\n{\"status\": \"CONTINUE\", \"message\": \"Your optional note here\"}\n```"+`
-
-To stop:
-`+"```json\n{\"status\": \"STOP\", \"reason\": \"Reason for stopping\"}\n```"+`
-
-Wait for the human to provide guidance before writing your decision.`, message)
+Wait for the human to provide guidance before reporting your decision.`, message)
 }

@@ -12,6 +12,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/mpataki/shop/internal/config"
 	shopLua "github.com/mpataki/shop/internal/lua"
+	"github.com/mpataki/shop/internal/mcp"
 	"github.com/mpataki/shop/internal/models"
 	"github.com/mpataki/shop/internal/orchestrator"
 	"github.com/mpataki/shop/internal/storage"
@@ -35,6 +36,7 @@ func main() {
 	rootCmd.AddCommand(newDeleteCommand())
 	rootCmd.AddCommand(newContinueCommand())
 	rootCmd.AddCommand(newStopCommand())
+	rootCmd.AddCommand(newMCPServerCommand())
 
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)
@@ -588,5 +590,28 @@ func newStopCommand() *cobra.Command {
 	}
 
 	cmd.Flags().String("reason", "", "Reason for stopping the run")
+	return cmd
+}
+
+func newMCPServerCommand() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:    "mcp-server",
+		Short:  "Run the Shop MCP server (used internally)",
+		Hidden: true,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			agent, _ := cmd.Flags().GetString("agent")
+			signalDir, _ := cmd.Flags().GetString("signal-dir")
+
+			if agent == "" || signalDir == "" {
+				return fmt.Errorf("--agent and --signal-dir are required")
+			}
+
+			server := mcp.NewServer(agent, signalDir)
+			return server.Run()
+		},
+	}
+
+	cmd.Flags().String("agent", "", "Agent name for signal file")
+	cmd.Flags().String("signal-dir", "", "Directory to write signal files")
 	return cmd
 }

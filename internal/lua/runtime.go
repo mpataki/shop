@@ -305,7 +305,7 @@ func (r *Runtime) runAgent(agent, prompt string, exec *models.Execution) (map[st
 	r.emit(models.Event{Type: models.EventAgentStarted, RunID: r.run.ID, Agent: agent})
 
 	// Run Claude
-	sessionID, exitCode, err := r.runClaude(agent, agentPrompt, exec.ID)
+	sessionID, exitCode, err := r.runClaude(agent, agent, agentPrompt, exec.ID)
 	if err != nil {
 		exec.Status = models.ExecStatusFailed
 		r.storage.UpdateExecution(exec)
@@ -622,7 +622,7 @@ func (r *Runtime) runCheckpoint(message string) (map[string]any, error) {
 	checkpointPrompt := r.buildCheckpointPrompt(message)
 
 	// Run Claude for checkpoint
-	sessionID, _, err := r.runClaude("", checkpointPrompt, exec.ID)
+	sessionID, _, err := r.runClaude("", agent, checkpointPrompt, exec.ID)
 	if err != nil {
 		exec.Status = models.ExecStatusFailed
 		r.storage.UpdateExecution(exec)

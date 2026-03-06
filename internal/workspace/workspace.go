@@ -214,15 +214,13 @@ codebase before and after you.
 
 ## Signaling Completion
 
-**IMPORTANT:** When your work is complete, write your decision to:
-` + "`" + `.agents/signals/{your-role}.json` + "`" + `
+**IMPORTANT:** When your work is complete, call the ` + "`" + `report_signal` + "`" + ` tool.
 
-Include a ` + "`" + `summary` + "`" + ` field with key information for the next agent. Example:
-` + "```" + `json
-{"status": "DONE", "summary": "Implemented feature X. Note: Y needs attention."}
-` + "```" + `
+Include a ` + "`" + `summary` + "`" + ` with key information for the next agent. Example:
 
-Valid status values depend on your role—check the orchestration spec.
+` + "`" + `report_signal(status="DONE", summary="Implemented feature X. Note: Y needs attention.")` + "`" + `
+
+Valid statuses: DONE, BLOCKED, NEEDS_HUMAN, APPROVED, CHANGES_REQUESTED
 
 ## Private Workspace
 
