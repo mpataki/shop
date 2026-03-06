@@ -229,9 +229,6 @@ func (a *App) handleRunListKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "n":
 		return a, a.enterNewRunView()
 
-	case "r":
-		return a, a.loadRuns
-
 	case "x":
 		if len(a.runs) > 0 && a.selectedIdx < len(a.runs) {
 			return a, a.killRun(a.runs[a.selectedIdx].ID)
@@ -469,7 +466,7 @@ func (a *App) viewRunList() string {
 		}
 	}
 
-	s += "\n" + helpStyle.Render("[j/k] navigate  [l/enter] view  [c] continue  [x] kill  [d] delete  [r] refresh  [q] quit")
+	s += "\n" + helpStyle.Render("[j/k] navigate  [l/enter] view  [n] new  [c] continue  [x] kill  [d] delete  [q] quit")
 
 	return s
 }
