@@ -14,12 +14,15 @@ type Storage struct {
 }
 
 func New(dbPath string) (*Storage, error) {
-	// Add busy_timeout and WAL mode for better concurrent access
-	dsn := dbPath + "?_busy_timeout=5000&_journal_mode=WAL"
-	db, err := sql.Open("sqlite", dsn)
+	db, err := sql.Open("sqlite", dbPath)
 	if err != nil {
 		return nil, err
 	}
+
+	// WAL mode allows concurrent reads + one writer without SQLITE_BUSY
+	// busy_timeout retries for 5s instead of failing immediately on lock contention
+	db.Exec("PRAGMA journal_mode=WAL")
+	db.Exec("PRAGMA busy_timeout=5000")
 
 	s := &Storage{db: db}
 	if err := s.migrate(); err != nil {

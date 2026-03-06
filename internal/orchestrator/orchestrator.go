@@ -82,12 +82,14 @@ func (o *Orchestrator) StartRun(workflowPath, workflowName, prompt, sourceRepo s
 func (o *Orchestrator) Execute(run *models.Run) error {
 	ws, err := workspace.Open(o.workspaceDir, run.ID)
 	if err != nil {
+		o.failRun(run, fmt.Errorf("failed to open workspace: %w", err))
 		return err
 	}
 
 	// Update run status to running
 	run.Status = models.RunStatusRunning
 	if err := o.storage.UpdateRun(run); err != nil {
+		o.failRun(run, err)
 		return err
 	}
 	o.emit(models.Event{Type: models.EventRunStatusChanged, RunID: run.ID, Status: models.RunStatusRunning})
@@ -109,17 +111,22 @@ func (o *Orchestrator) Execute(run *models.Run) error {
 
 		// Mark run as failed if not already stuck or waiting
 		if run.Status != models.RunStatusStuck && run.Status != models.RunStatusWaitingHuman {
-			now := time.Now()
-			run.Status = models.RunStatusFailed
-			run.CompletedAt = &now
-			run.Error = err.Error()
-			o.storage.UpdateRun(run)
-			o.emit(models.Event{Type: models.EventRunStatusChanged, RunID: run.ID, Status: models.RunStatusFailed})
+			o.failRun(run, err)
 		}
 		return err
 	}
 
 	return nil
+}
+
+// failRun marks a run as failed and emits an event.
+func (o *Orchestrator) failRun(run *models.Run, err error) {
+	now := time.Now()
+	run.Status = models.RunStatusFailed
+	run.CompletedAt = &now
+	run.Error = err.Error()
+	o.storage.UpdateRun(run)
+	o.emit(models.Event{Type: models.EventRunStatusChanged, RunID: run.ID, Status: models.RunStatusFailed})
 }
 
 // Resume resumes a Lua workflow from where it left off
