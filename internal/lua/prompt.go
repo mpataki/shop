@@ -17,10 +17,11 @@ func (r *Runtime) buildAgentPrompt(agent, prompt string) string {
 	// Direct agent to read context file for history
 	if r.callIndex > 1 {
 		result += "\n\n---\n"
-		result += "IMPORTANT: Read `.agents/context.md` for context from previous agents before starting work."
+		result += fmt.Sprintf("IMPORTANT: Read `%s` for context from previous agents before starting work.", r.ws.ContextPath())
 	}
 
 	result += fmt.Sprintf("\n\nYou are the '%s' agent in the '%s' workflow.", agent, r.run.WorkflowName)
+	result += fmt.Sprintf("\nUse `%s` for drafts or intermediate work.", r.ws.ScratchpadPath(agent))
 
 	result += "\n\n---\n"
 	result += "IMPORTANT: When you have completed your task, you MUST call the `report_signal` tool to report your status.\n"

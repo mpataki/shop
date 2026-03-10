@@ -1,6 +1,7 @@
 package lua
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -13,14 +14,23 @@ import (
 // runClaude executes the Claude CLI and returns the session ID and exit code.
 // claudeAgent is the --agent flag (agent .md file name, empty for no agent mode).
 // signalAgent is the name used for the MCP signal file.
-func (r *Runtime) runClaude(claudeAgent, signalAgent, prompt string, execID int64) (sessionID string, exitCode int, err error) {
+// runClaudeResult holds the output of a Claude CLI invocation.
+type runClaudeResult struct {
+	SessionID string
+	ExitCode  int
+	Stderr    string
+	// ErrorResult is extracted from claude's JSON output when is_error is true
+	ErrorResult string
+}
+
+func (r *Runtime) runClaude(claudeAgent, signalAgent, prompt, model string, execID int64) (*runClaudeResult, error) {
 	// Set up MCP config so the agent can call report_signal
 	if err := r.writeMCPConfig(signalAgent); err != nil {
-		return "", 0, fmt.Errorf("failed to write MCP config: %w", err)
+		return nil, fmt.Errorf("failed to write MCP config: %w", err)
 	}
 
 	// Pre-generate session ID so we can resume the session while it's still running
-	sessionID = uuid.New().String()
+	sessionID := uuid.New().String()
 
 	args := []string{
 		"-p", prompt,
@@ -28,6 +38,11 @@ func (r *Runtime) runClaude(claudeAgent, signalAgent, prompt string, execID int6
 		"--dangerously-skip-permissions",
 		"--max-turns", "10",
 		"--session-id", sessionID,
+		"--mcp-config", r.ws.MCPConfigPath(),
+	}
+
+	if model != "" {
+		args = append(args, "--model", model)
 	}
 
 	if claudeAgent != "" {
@@ -36,9 +51,12 @@ func (r *Runtime) runClaude(claudeAgent, signalAgent, prompt string, execID int6
 
 	cmd := exec.Command("claude", args...)
 	cmd.Dir = r.ws.RepoPath
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
 
 	if err := cmd.Start(); err != nil {
-		return "", 0, err
+		return nil, err
 	}
 
 	// Store PID and session ID immediately so TUI can resume live sessions
@@ -48,24 +66,36 @@ func (r *Runtime) runClaude(claudeAgent, signalAgent, prompt string, execID int6
 	r.storage.UpdateExecutionSessionID(execID, sessionID)
 
 	// Wait for completion
-	err = cmd.Wait()
-	exitCode = 0
+	result := &runClaudeResult{SessionID: sessionID}
+	err := cmd.Wait()
 	if cmd.ProcessState != nil {
-		exitCode = cmd.ProcessState.ExitCode()
+		result.ExitCode = cmd.ProcessState.ExitCode()
 	}
+	result.Stderr = stderr.String()
 
-	if err != nil {
-		if exitErr, ok := err.(*exec.ExitError); ok {
-			exitCode = exitErr.ExitCode()
-		} else {
-			return "", 0, err
+	// Parse JSON output to extract error messages
+	if stdout.Len() > 0 {
+		var output struct {
+			IsError bool   `json:"is_error"`
+			Result  string `json:"result"`
+		}
+		if json.Unmarshal(stdout.Bytes(), &output) == nil && output.IsError {
+			result.ErrorResult = output.Result
 		}
 	}
 
-	return sessionID, exitCode, nil
+	if err != nil {
+		if _, ok := err.(*exec.ExitError); ok {
+			// Non-zero exit — not a Go-level error, caller inspects ExitCode + Stderr
+			return result, nil
+		}
+		return nil, err
+	}
+
+	return result, nil
 }
 
-// writeMCPConfig writes .mcp.json to the workspace so Claude discovers the Shop MCP server.
+// writeMCPConfig writes mcp.json to the workspace root (outside the repo worktree).
 func (r *Runtime) writeMCPConfig(signalAgent string) error {
 	shopBin, err := os.Executable()
 	if err != nil {
@@ -76,13 +106,11 @@ func (r *Runtime) writeMCPConfig(signalAgent string) error {
 		return fmt.Errorf("failed to resolve shop binary path: %w", err)
 	}
 
-	signalDir := filepath.Join(r.ws.RepoPath, ".agents", "signals")
-
 	mcpConfig := map[string]any{
 		"mcpServers": map[string]any{
 			"shop": map[string]any{
 				"command": shopBin,
-				"args":    []string{"mcp-server", "--agent", signalAgent, "--signal-dir", signalDir},
+				"args":    []string{"mcp-server", "--agent", signalAgent, "--signal-dir", r.ws.SignalDir()},
 			},
 		},
 	}
@@ -92,5 +120,5 @@ func (r *Runtime) writeMCPConfig(signalAgent string) error {
 		return err
 	}
 
-	return os.WriteFile(filepath.Join(r.ws.RepoPath, ".mcp.json"), data, 0644)
+	return os.WriteFile(r.ws.MCPConfigPath(), data, 0644)
 }

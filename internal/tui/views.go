@@ -155,6 +155,10 @@ func (a *App) renderExecRow(i int, exec *models.Execution) string {
 	status := a.formatExecStatus(exec)
 	duration := a.formatExecDuration(exec)
 	signal := a.formatSignalStatus(exec)
+	model := ""
+	if exec.Model != "" {
+		model = dimStyle.Render(exec.Model)
+	}
 
 	if selected {
 		return cursorStyle.Render("❯ ") +
@@ -162,10 +166,10 @@ func (a *App) renderExecRow(i int, exec *models.Execution) string {
 			selectedRowStyle.Render(agent) + "  " +
 			status + "  " +
 			selectedRowStyle.Render(padRight(duration, 8)) + "  " +
-			signal
+			signal + "  " + model
 	}
 
-	return "  " + num + "  " + agent + "  " + status + "  " + padRight(duration, 8) + "  " + signal
+	return "  " + num + "  " + agent + "  " + status + "  " + padRight(duration, 8) + "  " + signal + "  " + model
 }
 
 func (a *App) formatExecStatus(exec *models.Execution) string {
@@ -218,6 +222,12 @@ func (a *App) formatSignalStatus(exec *models.Execution) string {
 		return signalBlockedStyle.Render(sig)
 	case models.SignalNeedsHuman:
 		return signalNeedsHumanStyle.Render(sig)
+	case models.SignalError:
+		reason, _ := exec.OutputSignal["reason"].(string)
+		if reason != "" {
+			return statusFailedStyle.Render(reason)
+		}
+		return statusFailedStyle.Render(sig)
 	default:
 		return dimStyle.Render(sig)
 	}
@@ -337,7 +347,7 @@ func (a *App) viewNewRun() string {
 
 	// Help
 	if a.focusOnPrompt {
-		b.WriteString(helpStyle.Render("  ↵ start  esc back  ctrl+c quit"))
+		b.WriteString(helpStyle.Render("  ↵ start  alt+↵ newline  esc back  ctrl+c quit"))
 	} else {
 		b.WriteString(helpStyle.Render("  j/k ↕  ↵/tab enter prompt  esc cancel  ctrl+c quit"))
 	}
@@ -373,6 +383,11 @@ func (a *App) contentWidth() int {
 		w = 60
 	}
 	return w
+}
+
+// promptBoxInnerWidth returns the usable width inside the prompt box (minus border + padding).
+func (a *App) promptBoxInnerWidth() int {
+	return a.contentWidth() - 4 // 2 border + 2 padding
 }
 
 func padRight(s string, n int) string {

@@ -89,6 +89,9 @@ func (s *Storage) migrate() error {
 	s.db.Exec(`ALTER TABLE runs ADD COLUMN waiting_reason TEXT`)
 	s.db.Exec(`ALTER TABLE runs ADD COLUMN waiting_session_id TEXT`)
 
+	// Migration: add model column to executions
+	s.db.Exec(`ALTER TABLE executions ADD COLUMN model TEXT`)
+
 	return nil
 }
 
@@ -134,14 +137,14 @@ const runColumns = `id, created_at, completed_at, initial_prompt, workflow_name,
 // scanExecution scans an Execution from a row, reducing boilerplate across queries.
 func scanExecution(scanner interface{ Scan(...any) error }) (*models.Execution, error) {
 	var exec models.Execution
-	var sessionID, signalJSON, prompt sql.NullString
+	var sessionID, signalJSON, prompt, model sql.NullString
 	var exitCode, pid, callIndex sql.NullInt64
 	var startedAt, completedAt sql.NullTime
 
 	err := scanner.Scan(
 		&exec.ID, &exec.RunID, &exec.AgentName, &sessionID, &exec.Status,
 		&exitCode, &startedAt, &completedAt, &signalJSON, &exec.SequenceNum,
-		&pid, &callIndex, &prompt,
+		&pid, &callIndex, &prompt, &model,
 	)
 	if err != nil {
 		return nil, err
@@ -176,11 +179,14 @@ func scanExecution(scanner interface{ Scan(...any) error }) (*models.Execution, 
 	if prompt.Valid {
 		exec.Prompt = prompt.String
 	}
+	if model.Valid {
+		exec.Model = model.String
+	}
 
 	return &exec, nil
 }
 
-const execColumns = `id, run_id, agent_name, claude_session_id, status, exit_code, started_at, completed_at, output_signal, sequence_num, pid, call_index, prompt`
+const execColumns = `id, run_id, agent_name, claude_session_id, status, exit_code, started_at, completed_at, output_signal, sequence_num, pid, call_index, prompt, model`
 
 func (s *Storage) CreateRun(run *models.Run) (int64, error) {
 	result, err := s.db.Exec(
@@ -240,9 +246,9 @@ func (s *Storage) CreateExecution(exec *models.Execution) (int64, error) {
 
 	result, err := s.db.Exec(
 		`INSERT INTO executions (`+execColumns[4:]+`)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		exec.RunID, exec.AgentName, exec.ClaudeSessionID, exec.Status,
-		exec.ExitCode, exec.StartedAt, exec.CompletedAt, signalJSON, exec.SequenceNum, exec.PID, exec.CallIndex, exec.Prompt,
+		exec.ExitCode, exec.StartedAt, exec.CompletedAt, signalJSON, exec.SequenceNum, exec.PID, exec.CallIndex, exec.Prompt, exec.Model,
 	)
 	if err != nil {
 		return 0, err

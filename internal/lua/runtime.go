@@ -159,7 +159,25 @@ func (r *Runtime) registerAPI(L *lua.LState) {
 // luaRun implements the run(agent, prompt?) API
 func (r *Runtime) luaRun(L *lua.LState) int {
 	agent := L.CheckString(1)
-	prompt := L.OptString(2, "")
+
+	// Second arg: optional string (prompt) or table ({prompt, model})
+	var prompt, model string
+	if v := L.Get(2); v != lua.LNil {
+		switch v := v.(type) {
+		case lua.LString:
+			prompt = string(v)
+		case *lua.LTable:
+			if p := v.RawGetString("prompt"); p != lua.LNil {
+				prompt = p.String()
+			}
+			if m := v.RawGetString("model"); m != lua.LNil {
+				model = m.String()
+			}
+		default:
+			L.ArgError(2, "expected string or table")
+			return 0
+		}
+	}
 
 	r.callIndex++
 
@@ -194,7 +212,7 @@ func (r *Runtime) luaRun(L *lua.LState) int {
 			}
 		} else {
 			// Failed - re-run
-			signal, err = r.runAgent(agent, prompt, exec)
+			signal, err = r.runAgent(agent, prompt, model, exec)
 			if err != nil {
 				// Check if we're now waiting for human
 				if r.waitingHuman {
@@ -212,7 +230,7 @@ func (r *Runtime) luaRun(L *lua.LState) int {
 			// Invalidate remaining cached executions
 			r.storage.InvalidateExecutionsAfterIndex(r.run.ID, r.callIndex-1)
 			// Run fresh
-			signal, err = r.runAgentFresh(agent, prompt)
+			signal, err = r.runAgentFresh(agent, prompt, model)
 			if err != nil {
 				L.RaiseError("failed to run agent: %v", err)
 				return 0
@@ -220,7 +238,7 @@ func (r *Runtime) luaRun(L *lua.LState) int {
 		}
 	} else {
 		// No cached execution - run fresh
-		signal, err = r.runAgentFresh(agent, prompt)
+		signal, err = r.runAgentFresh(agent, prompt, model)
 		if err != nil {
 			// Check if we're now waiting for human
 			if r.waitingHuman {
@@ -239,7 +257,7 @@ func (r *Runtime) luaRun(L *lua.LState) int {
 }
 
 // runAgentFresh creates a new execution and runs the agent
-func (r *Runtime) runAgentFresh(agent, prompt string) (map[string]any, error) {
+func (r *Runtime) runAgentFresh(agent, prompt, model string) (map[string]any, error) {
 	// Get next sequence number
 	execs, err := r.storage.GetExecutionsForRun(r.run.ID)
 	if err != nil {
@@ -255,6 +273,7 @@ func (r *Runtime) runAgentFresh(agent, prompt string) (map[string]any, error) {
 		SequenceNum: seqNum,
 		CallIndex:   r.callIndex,
 		Prompt:      prompt,
+		Model:       model,
 	}
 
 	execID, err := r.storage.CreateExecution(exec)
@@ -263,11 +282,11 @@ func (r *Runtime) runAgentFresh(agent, prompt string) (map[string]any, error) {
 	}
 	exec.ID = execID
 
-	return r.runAgent(agent, prompt, exec)
+	return r.runAgent(agent, prompt, model, exec)
 }
 
 // runAgent executes the Claude agent and returns its signal
-func (r *Runtime) runAgent(agent, prompt string, exec *models.Execution) (map[string]any, error) {
+func (r *Runtime) runAgent(agent, prompt, model string, exec *models.Execution) (map[string]any, error) {
 	// Update run's current agent
 	r.run.CurrentAgent = agent
 	if err := r.storage.UpdateRun(r.run); err != nil {
@@ -305,25 +324,44 @@ func (r *Runtime) runAgent(agent, prompt string, exec *models.Execution) (map[st
 	r.emit(models.Event{Type: models.EventAgentStarted, RunID: r.run.ID, Agent: agent})
 
 	// Run Claude
-	sessionID, exitCode, err := r.runClaude(agent, agent, agentPrompt, exec.ID)
+	result, err := r.runClaude(agent, agent, agentPrompt, model, exec.ID)
 	if err != nil {
 		exec.Status = models.ExecStatusFailed
 		r.storage.UpdateExecution(exec)
-		return map[string]any{"status": string(models.SignalError), "reason": fmt.Sprintf("agent execution failed: %v", err)}, nil
+		reason := fmt.Sprintf("agent execution failed: %v", err)
+		r.emit(models.Event{Type: models.EventLogMessage, RunID: r.run.ID, Agent: agent, Message: reason})
+		return map[string]any{"status": string(models.SignalError), "reason": reason}, nil
+	}
+
+	// Update session info on the in-memory exec so UpdateExecution doesn't clobber it
+	exec.ClaudeSessionID = result.SessionID
+	exec.ExitCode = &result.ExitCode
+
+	// If claude reported an error in its JSON output, fail fast
+	if result.ErrorResult != "" {
+		exec.Status = models.ExecStatusFailed
+		r.emit(models.Event{Type: models.EventLogMessage, RunID: r.run.ID, Agent: agent, Message: result.ErrorResult})
+		exec.OutputSignal = map[string]any{"status": string(models.SignalError), "reason": result.ErrorResult}
+		r.storage.UpdateExecution(exec)
+		return exec.OutputSignal, nil
 	}
 
 	// Read signal
 	signal, err := r.ws.ReadSignal(agent)
 	if err != nil {
 		exec.Status = models.ExecStatusFailed
+		errReason := fmt.Sprintf("no signal (exit %d)", result.ExitCode)
+		if result.Stderr != "" {
+			errReason += ": " + result.Stderr
+		}
+		r.emit(models.Event{Type: models.EventLogMessage, RunID: r.run.ID, Agent: agent, Message: errReason})
+		exec.OutputSignal = map[string]any{"status": string(models.SignalError), "reason": errReason}
 		r.storage.UpdateExecution(exec)
-		return map[string]any{"status": string(models.SignalError), "reason": fmt.Sprintf("no signal produced: %v", err)}, nil
+		return exec.OutputSignal, nil
 	}
 
 	// Update execution with results
 	completedAt := time.Now()
-	exec.ClaudeSessionID = sessionID
-	exec.ExitCode = &exitCode
 	exec.CompletedAt = &completedAt
 	exec.OutputSignal = signal
 	exec.Status = models.ExecStatusComplete
@@ -343,7 +381,7 @@ func (r *Runtime) runAgent(agent, prompt string, exec *models.Execution) (map[st
 
 		// Set up waiting state
 		r.waitingHuman = true
-		r.waitingSessionID = sessionID
+		r.waitingSessionID = exec.ClaudeSessionID
 		r.waitingAgent = agent
 		r.waitingExecID = exec.ID
 		if reason, ok := signal["reason"].(string); ok {
@@ -362,7 +400,7 @@ func (r *Runtime) runAgent(agent, prompt string, exec *models.Execution) (map[st
 	}
 
 	// Add session ID to signal for debugging
-	signal["_session_id"] = sessionID
+	signal["_session_id"] = exec.ClaudeSessionID
 
 	return signal, nil
 }
@@ -406,8 +444,8 @@ func (r *Runtime) recoverExecution(exec *models.Execution) (map[string]any, erro
 		return signal, nil
 	}
 
-	// No signal - need to re-run
-	return r.runAgent(exec.AgentName, exec.Prompt, exec)
+	// No signal - need to re-run (model not stored in execution, uses default)
+	return r.runAgent(exec.AgentName, exec.Prompt, "", exec)
 }
 
 
@@ -623,12 +661,14 @@ func (r *Runtime) runCheckpoint(message string) (map[string]any, error) {
 	checkpointPrompt := r.buildCheckpointPrompt(message)
 
 	// Run Claude for checkpoint
-	sessionID, _, err := r.runClaude("", agent, checkpointPrompt, exec.ID)
+	result, err := r.runClaude("", agent, checkpointPrompt, "", exec.ID)
 	if err != nil {
 		exec.Status = models.ExecStatusFailed
 		r.storage.UpdateExecution(exec)
 		return nil, fmt.Errorf("checkpoint agent failed: %w", err)
 	}
+
+	exec.ClaudeSessionID = result.SessionID
 
 	// Read signal
 	signal, err := r.ws.ReadSignal(agent)
@@ -646,7 +686,6 @@ func (r *Runtime) runCheckpoint(message string) (map[string]any, error) {
 	// Check if waiting for human
 	if status, ok := signal["status"].(string); ok && status == string(models.SignalNeedsHuman) {
 		// Mark execution as waiting
-		exec.ClaudeSessionID = sessionID
 		exec.Status = models.ExecStatusWaitingHuman
 		if err := r.storage.UpdateExecution(exec); err != nil {
 			return nil, err
@@ -654,7 +693,7 @@ func (r *Runtime) runCheckpoint(message string) (map[string]any, error) {
 
 		// Set up waiting state
 		r.waitingHuman = true
-		r.waitingSessionID = sessionID
+		r.waitingSessionID = result.SessionID
 		r.waitingAgent = agent
 		r.waitingExecID = exec.ID
 		r.waitingReason = message
@@ -664,7 +703,6 @@ func (r *Runtime) runCheckpoint(message string) (map[string]any, error) {
 
 	// Checkpoint completed immediately (shouldn't normally happen)
 	completedAt := time.Now()
-	exec.ClaudeSessionID = sessionID
 	exec.CompletedAt = &completedAt
 	exec.OutputSignal = signal
 	exec.Status = models.ExecStatusComplete

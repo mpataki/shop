@@ -6,7 +6,7 @@ function workflow(prompt)
 
   -- Run an agent that will return NEEDS_HUMAN
   log("Running needs-help agent...")
-  local result = run("needs-help", prompt)
+  local result = run("needs-help", {prompt = prompt, model = "sonnet"})
 
   -- This should only execute after human helps
   log("needs-help returned: " .. result.status)

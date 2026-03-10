@@ -8,10 +8,12 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 
 	"github.com/charmbracelet/bubbles/spinner"
-	"github.com/charmbracelet/bubbles/textinput"
+	"github.com/charmbracelet/bubbles/textarea"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 	"github.com/mpataki/shop/internal/config"
 	"github.com/mpataki/shop/internal/models"
 	"github.com/mpataki/shop/internal/orchestrator"
@@ -40,7 +42,7 @@ type App struct {
 
 	workflows           []config.WorkflowInfo
 	selectedWorkflowIdx int
-	promptInput         textinput.Model
+	promptInput         textarea.Model
 	focusOnPrompt       bool
 
 	spinner spinner.Model
@@ -53,10 +55,19 @@ type App struct {
 const maxLogs = 6
 
 func NewApp(orch *orchestrator.Orchestrator, cfg *config.Config) *App {
-	ti := textinput.New()
+	ti := textarea.New()
 	ti.Placeholder = "what should the agents do?"
-	ti.CharLimit = 500
-	ti.Width = 60
+	ti.CharLimit = 2000
+	ti.MaxHeight = 0 // no max, grows freely
+	ti.ShowLineNumbers = false
+	ti.Prompt = "  "
+	ti.FocusedStyle.CursorLine = lipgloss.NewStyle()
+	ti.FocusedStyle.Prompt = lipgloss.NewStyle().Foreground(lipgloss.Color("205"))
+	ti.FocusedStyle.Base = lipgloss.NewStyle()
+	ti.BlurredStyle.CursorLine = lipgloss.NewStyle()
+	ti.BlurredStyle.Prompt = lipgloss.NewStyle()
+	ti.BlurredStyle.Base = lipgloss.NewStyle()
+	ti.SetHeight(1)
 
 	sp := spinner.New()
 	sp.Spinner = spinner.MiniDot
@@ -102,6 +113,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		a.width = msg.Width
 		a.height = msg.Height
+		a.promptInput.SetWidth(a.promptBoxInnerWidth())
 		return a, nil
 
 	case orchestratorEventMsg:
@@ -195,7 +207,9 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.view = ViewNewRun
 			a.selectedWorkflowIdx = 0
 			a.focusOnPrompt = false
-			a.promptInput.SetValue("")
+			a.promptInput.Reset()
+			a.promptInput.SetHeight(1)
+			a.promptInput.SetWidth(a.promptBoxInnerWidth())
 			a.promptInput.Blur()
 		}
 		return a, nil
@@ -347,9 +361,15 @@ func (a *App) handleNewRunKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				return a, a.startNewRun()
 			}
 			return a, nil
+		case "alt+enter":
+			// Insert newline
+			a.promptInput.InsertString("\n")
+			a.resizePromptInput()
+			return a, nil
 		default:
 			var cmd tea.Cmd
 			a.promptInput, cmd = a.promptInput.Update(msg)
+			a.resizePromptInput()
 			return a, cmd
 		}
 	}
@@ -370,11 +390,19 @@ func (a *App) handleNewRunKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "enter", "tab":
 		if len(a.workflows) > 0 {
 			a.focusOnPrompt = true
-			a.promptInput.Focus()
-			return a, textinput.Blink
+			return a, a.promptInput.Focus()
 		}
 	}
 	return a, nil
+}
+
+// resizePromptInput adjusts the textarea height to fit its content (min 1 line).
+func (a *App) resizePromptInput() {
+	lines := strings.Count(a.promptInput.Value(), "\n") + 1
+	if lines < 1 {
+		lines = 1
+	}
+	a.promptInput.SetHeight(lines)
 }
 
 // ── Activity Log ──────────────────────────────────────────────────────────────

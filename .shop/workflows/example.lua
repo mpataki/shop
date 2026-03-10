@@ -5,7 +5,7 @@ function workflow(prompt)
   log("Starting example workflow")
 
   -- Run the architect agent with the initial prompt
-  local arch = run("architect", prompt)
+  local arch = run("architect", {prompt = prompt, model = "sonnet"})
   if arch.status == "BLOCKED" then
     return stuck(arch.reason or "architect blocked")
   end
@@ -17,12 +17,12 @@ function workflow(prompt)
   for i = 1, 5 do
     log("Iteration " .. i .. " of review loop")
 
-    local code = run("coder")
+    local code = run("coder", {model = "sonnet"})
     if code.status == "BLOCKED" then
       return stuck(code.reason or "coder blocked")
     end
 
-    local review = run("reviewer")
+    local review = run("reviewer", {model = "sonnet"})
     if review.status == "APPROVED" then
       log("Changes approved!")
       return -- success

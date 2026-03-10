@@ -6,9 +6,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strings"
-
-	"github.com/mpataki/shop/internal/models"
 )
 
 type Workspace struct {
@@ -50,23 +47,16 @@ func Create(baseDir string, runID int64, sourceRepo string) (*Workspace, error) 
 		}
 	}
 
-	// Create .agents/ and .shop/ directories inside repo
+	// Create orchestration directories as siblings to repo (keeps worktree clean)
 	dirs := []string{
-		filepath.Join(w.RepoPath, ".agents", "messages"),
-		filepath.Join(w.RepoPath, ".agents", "signals"),
-		filepath.Join(w.RepoPath, ".agents", "scratchpad"),
-		filepath.Join(w.RepoPath, ".shop"),
+		filepath.Join(path, "signals"),
+		filepath.Join(path, "scratchpad"),
 	}
 
 	for _, dir := range dirs {
 		if err := os.MkdirAll(dir, 0755); err != nil {
 			return nil, fmt.Errorf("failed to create directory %s: %w", dir, err)
 		}
-	}
-
-	// Write the skill file
-	if err := w.writeSkillFile(); err != nil {
-		return nil, err
 	}
 
 	return w, nil
@@ -113,7 +103,7 @@ func Open(baseDir string, runID int64) (*Workspace, error) {
 }
 
 func (w *Workspace) WriteRunMetadata(meta *RunMetadata) error {
-	path := filepath.Join(w.RepoPath, ".shop", "run.json")
+	path := filepath.Join(w.Path, "run.json")
 
 	data, err := json.MarshalIndent(meta, "", "  ")
 	if err != nil {
@@ -127,8 +117,12 @@ func (w *Workspace) WriteRunMetadata(meta *RunMetadata) error {
 	return nil
 }
 
+func (w *Workspace) SignalDir() string {
+	return filepath.Join(w.Path, "signals")
+}
+
 func (w *Workspace) ReadSignal(agentName string) (map[string]any, error) {
-	path := filepath.Join(w.RepoPath, ".agents", "signals", agentName+".json")
+	path := filepath.Join(w.Path, "signals", agentName+".json")
 
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -147,7 +141,7 @@ func (w *Workspace) ReadSignal(agentName string) (map[string]any, error) {
 }
 
 func (w *Workspace) WriteSignal(agentName string, signal map[string]any) error {
-	path := filepath.Join(w.RepoPath, ".agents", "signals", agentName+".json")
+	path := filepath.Join(w.Path, "signals", agentName+".json")
 
 	data, err := json.MarshalIndent(signal, "", "  ")
 	if err != nil {
@@ -162,18 +156,25 @@ func (w *Workspace) WriteSignal(agentName string, signal map[string]any) error {
 }
 
 func (w *Workspace) CreateAgentScratchpad(agentName string) error {
-	path := filepath.Join(w.RepoPath, ".agents", "scratchpad", agentName)
-	return os.MkdirAll(path, 0755)
+	return os.MkdirAll(filepath.Join(w.Path, "scratchpad", agentName), 0755)
+}
+
+func (w *Workspace) ScratchpadPath(agentName string) string {
+	return filepath.Join(w.Path, "scratchpad", agentName)
+}
+
+func (w *Workspace) ContextPath() string {
+	return filepath.Join(w.Path, "context.md")
 }
 
 func (w *Workspace) InitContext(workflowName, prompt string) error {
-	path := filepath.Join(w.RepoPath, ".agents", "context.md")
+	path := filepath.Join(w.Path, "context.md")
 	content := fmt.Sprintf("# Run Context\n\n**Workflow:** %s\n\n**Task:** %s\n\n---\n\n", workflowName, prompt)
 	return os.WriteFile(path, []byte(content), 0644)
 }
 
 func (w *Workspace) AppendContext(agentName string, signal map[string]any) error {
-	path := filepath.Join(w.RepoPath, ".agents", "context.md")
+	path := filepath.Join(w.Path, "context.md")
 
 	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
@@ -195,41 +196,6 @@ func (w *Workspace) AppendContext(agentName string, signal map[string]any) error
 	return err
 }
 
-func (w *Workspace) writeSkillFile() error {
-	skillPath := filepath.Join(w.RepoPath, ".agents", "SKILL.md")
-	content := fmt.Sprintf(`---
-name: shop-protocol
-description: Protocol for multi-agent orchestrated workflows. Use when .agents/ directory exists.
----
-
-# Shop Workspace Protocol
-
-You are one agent in a coordinated workflow. Other agents work on this
-codebase before and after you.
-
-## Reading Context
-
-1. Read %[1]s.agents/context.md%[1]s for the task description and notes from previous agents
-2. Check %[1]s.shop/run.json%[1]s for run metadata if needed
-
-## Signaling Completion
-
-**IMPORTANT:** When your work is complete, call the %[1]sreport_signal%[1]s tool.
-
-Include a %[1]ssummary%[1]s with key information for the next agent. Example:
-
-%[1]sreport_signal(status="DONE", summary="Implemented feature X. Note: Y needs attention.")%[1]s
-
-Valid statuses: %s
-
-## Private Workspace
-
-Use %[1]s.agents/scratchpad/{your-role}/%[1]s for drafts or intermediate work.
-
-## Git Commits
-
-Make atomic commits with clear messages. The commit history is part of
-the communication trail.
-`, "`", strings.Join(models.ValidAgentStatusStrings(), ", "))
-	return os.WriteFile(skillPath, []byte(content), 0644)
+func (w *Workspace) MCPConfigPath() string {
+	return filepath.Join(w.Path, "mcp.json")
 }

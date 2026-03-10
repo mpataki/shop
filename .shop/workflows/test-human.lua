@@ -6,7 +6,7 @@ function workflow(prompt)
 
   -- First, run a simple agent that completes
   log("Running test-worker agent...")
-  local result = run("test-worker", prompt)
+  local result = run("test-worker", {prompt = prompt, model = "sonnet"})
   log("test-worker returned: " .. result.status)
 
   -- Now test pause() - explicit checkpoint
@@ -21,7 +21,7 @@ function workflow(prompt)
 
   -- Run another agent
   log("Running test-worker again...")
-  local result2 = run("test-worker")
+  local result2 = run("test-worker", {model = "sonnet"})
   log("test-worker returned: " .. result2.status)
 
   log("Test workflow complete!")

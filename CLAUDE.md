@@ -55,15 +55,18 @@ end
 Each `run()` call is assigned a `call_index`. Before executing an agent, the runtime checks SQLite for a cached result at that index. On resume, completed executions return their cached signals without re-running.
 
 ### Workspace Structure
-Each run gets a git worktree at `~/.shop/workspaces/run-{id}/repo/` with:
-- `.agents/signals/{agent}.json` - Agent output signals
-- `.agents/context.md` - Accumulated context for agents
-- `.agents/scratchpad/{agent}/` - Per-agent scratch space
+Each run gets a workspace at `~/.shop/workspaces/run-{id}/` with:
+- `repo/` - Git worktree (kept clean of orchestration files)
+- `signals/{agent}.json` - Agent output signals
+- `context.md` - Accumulated context for agents
+- `scratchpad/{agent}/` - Per-agent scratch space
+- `run.json` - Run metadata
+- `mcp.json` - MCP server config (passed via `--mcp-config` flag)
 
 ### Agent Invocation
 Agents are invoked via: `claude --agent {name} -p {prompt} --output-format json --dangerously-skip-permissions`
 
-Agents must exist as `.claude/agents/{name}.md` in the workspace and must write their signal to `.agents/signals/{name}.json`.
+Agents must exist as `.claude/agents/{name}.md` in the repo worktree. Signals are written via the MCP `report_signal` tool to `signals/{name}.json` in the workspace root.
 
 ## Database Schema
 
@@ -91,7 +94,9 @@ shop                           # Launch TUI
 
 ## Lua API (available in workflow scripts)
 
-- `run(agent, prompt?)` → signal table with `status`, `_session_id`, etc.
+- `run(agent, prompt?)` or `run(agent, {prompt?, model?})` → signal table with `status`, `_session_id`, etc.
+  - Second arg can be a string (prompt) or table with `prompt` and `model` fields
+  - `model` accepts Claude model aliases: `"sonnet"`, `"opus"`, `"haiku"`, or full model IDs
   - If agent returns `{status: "NEEDS_HUMAN", reason: "..."}`, workflow pauses for human input
 - `pause(message)` → pause for human approval, returns `{continue: bool, reason: string, message: string}`
 - `stuck(reason?)` → terminate workflow as stuck

@@ -26,4 +26,5 @@ type Execution struct {
 	PID             *int
 	CallIndex       int    // position in Lua script execution (for Lua workflows)
 	Prompt          string // prompt passed to this specific run() call
+	Model           string // claude model alias or ID (e.g. "sonnet", "opus")
 }
