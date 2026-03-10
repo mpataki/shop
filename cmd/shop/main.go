@@ -600,18 +600,25 @@ func newMCPServerCommand() *cobra.Command {
 		Hidden: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			agent, _ := cmd.Flags().GetString("agent")
-			signalDir, _ := cmd.Flags().GetString("signal-dir")
+			dbPath, _ := cmd.Flags().GetString("db")
+			runID, _ := cmd.Flags().GetInt64("run-id")
+			execID, _ := cmd.Flags().GetInt64("execution-id")
 
-			if agent == "" || signalDir == "" {
-				return fmt.Errorf("--agent and --signal-dir are required")
+			if agent == "" {
+				return fmt.Errorf("--agent is required")
 			}
 
-			server := mcp.NewServer(agent, signalDir)
+			server := mcp.NewServer(agent, dbPath, runID, execID)
 			return server.Run()
 		},
 	}
 
-	cmd.Flags().String("agent", "", "Agent name for signal file")
-	cmd.Flags().String("signal-dir", "", "Directory to write signal files")
+	cmd.Flags().String("agent", "", "Agent name")
+	cmd.Flags().String("db", "", "Path to shop SQLite database")
+	cmd.Flags().Int64("run-id", 0, "Run ID")
+	cmd.Flags().Int64("execution-id", 0, "Execution ID")
+	// Legacy flag — accepted but ignored (sessions created before migration may pass it)
+	cmd.Flags().String("signal-dir", "", "")
+	cmd.Flags().MarkHidden("signal-dir")
 	return cmd
 }

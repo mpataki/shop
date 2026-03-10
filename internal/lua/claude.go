@@ -24,8 +24,8 @@ type runClaudeResult struct {
 }
 
 func (r *Runtime) runClaude(claudeAgent, signalAgent, prompt, model string, execID int64) (*runClaudeResult, error) {
-	// Set up MCP config so the agent can call report_signal
-	if err := r.writeMCPConfig(signalAgent); err != nil {
+	// Set up MCP config so the agent can call report_signal / get_context / get_run_info
+	if err := r.writeMCPConfig(signalAgent, execID); err != nil {
 		return nil, fmt.Errorf("failed to write MCP config: %w", err)
 	}
 
@@ -96,7 +96,8 @@ func (r *Runtime) runClaude(claudeAgent, signalAgent, prompt, model string, exec
 }
 
 // writeMCPConfig writes mcp.json to the workspace root (outside the repo worktree).
-func (r *Runtime) writeMCPConfig(signalAgent string) error {
+// execID is the execution record ID so the MCP server can write signals directly to SQLite.
+func (r *Runtime) writeMCPConfig(signalAgent string, execID int64) error {
 	shopBin, err := os.Executable()
 	if err != nil {
 		return fmt.Errorf("failed to find shop binary: %w", err)
@@ -110,7 +111,13 @@ func (r *Runtime) writeMCPConfig(signalAgent string) error {
 		"mcpServers": map[string]any{
 			"shop": map[string]any{
 				"command": shopBin,
-				"args":    []string{"mcp-server", "--agent", signalAgent, "--signal-dir", r.ws.SignalDir()},
+				"args": []string{
+					"mcp-server",
+					"--agent", signalAgent,
+					"--db", r.storage.DBPath(),
+					"--run-id", fmt.Sprintf("%d", r.run.ID),
+					"--execution-id", fmt.Sprintf("%d", execID),
+				},
 			},
 		},
 	}

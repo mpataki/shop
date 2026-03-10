@@ -298,18 +298,6 @@ func (r *Runtime) runAgent(agent, prompt, model string, exec *models.Execution) 
 		return nil, err
 	}
 
-	// Write run metadata
-	meta := &workspace.RunMetadata{
-		RunID:         r.run.ID,
-		WorkflowName:  r.run.WorkflowName,
-		InitialPrompt: r.run.InitialPrompt,
-		CurrentAgent:  agent,
-		Iteration:     r.callIndex,
-	}
-	if err := r.ws.WriteRunMetadata(meta); err != nil {
-		return nil, err
-	}
-
 	// Mark execution as running
 	now := time.Now()
 	exec.StartedAt = &now
@@ -346,9 +334,15 @@ func (r *Runtime) runAgent(agent, prompt, model string, exec *models.Execution) 
 		return exec.OutputSignal, nil
 	}
 
-	// Read signal
-	signal, err := r.ws.ReadSignal(agent)
+	// Read signal from DB — written by MCP server's report_signal tool during agent execution
+	latest, err := r.storage.GetExecution(exec.ID)
 	if err != nil {
+		return nil, fmt.Errorf("failed to read execution from DB: %w", err)
+	}
+	var signal map[string]any
+	if latest != nil && latest.OutputSignal != nil {
+		signal = latest.OutputSignal
+	} else {
 		exec.Status = models.ExecStatusFailed
 		errReason := fmt.Sprintf("no signal (exit %d)", result.ExitCode)
 		if result.Stderr != "" {
@@ -394,58 +388,48 @@ func (r *Runtime) runAgent(agent, prompt, model string, exec *models.Execution) 
 		return nil, fmt.Errorf("agent %s needs human input: %s", agent, r.waitingReason)
 	}
 
-	// Append to context for next agent
-	if err := r.ws.AppendContext(agent, signal); err != nil {
-		return nil, err
-	}
-
 	// Add session ID to signal for debugging
 	signal["_session_id"] = exec.ClaudeSessionID
 
 	return signal, nil
 }
 
-// recoverExecution tries to recover from a running or waiting execution
+// recoverExecution tries to recover from a running or waiting execution.
+// Re-fetches from DB to get the latest signal written by the MCP server.
 func (r *Runtime) recoverExecution(exec *models.Execution) (map[string]any, error) {
-	// Check if signal file exists (agent finished, we just missed it)
-	signal, err := r.ws.ReadSignal(exec.AgentName)
-	if err == nil {
-		// Signal exists - check if status has changed from NEEDS_HUMAN
-		if status, ok := signal["status"].(string); ok {
-			if status == string(models.SignalNeedsHuman) {
-				// Still waiting for human - suspend again
-				r.waitingHuman = true
-				r.waitingSessionID = exec.ClaudeSessionID
-				r.waitingAgent = exec.AgentName
-				r.waitingExecID = exec.ID
-				if reason, ok := signal["reason"].(string); ok {
-					r.waitingReason = reason
-				} else {
-					r.waitingReason = "Agent needs human input"
-				}
-				return nil, fmt.Errorf("agent %s still needs human input", exec.AgentName)
+	latest, err := r.storage.GetExecution(exec.ID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to re-fetch execution: %w", err)
+	}
+
+	if latest != nil && latest.OutputSignal != nil {
+		signal := latest.OutputSignal
+		if status, ok := signal["status"].(string); ok && status == string(models.SignalNeedsHuman) {
+			// Still waiting for human - suspend again
+			r.waitingHuman = true
+			r.waitingSessionID = latest.ClaudeSessionID
+			r.waitingAgent = exec.AgentName
+			r.waitingExecID = exec.ID
+			if reason, ok := signal["reason"].(string); ok {
+				r.waitingReason = reason
+			} else {
+				r.waitingReason = "Agent needs human input"
 			}
+			return nil, fmt.Errorf("agent %s still needs human input", exec.AgentName)
 		}
 
-		// Signal changed - agent completed after human interaction
+		// Signal present and not NEEDS_HUMAN — agent completed
 		completedAt := time.Now()
-		exec.CompletedAt = &completedAt
-		exec.OutputSignal = signal
-		exec.Status = models.ExecStatusComplete
-		if err := r.storage.UpdateExecution(exec); err != nil {
+		latest.CompletedAt = &completedAt
+		latest.Status = models.ExecStatusComplete
+		if err := r.storage.UpdateExecution(latest); err != nil {
 			return nil, err
 		}
-
-		// Append to context for next agent
-		if err := r.ws.AppendContext(exec.AgentName, signal); err != nil {
-			return nil, err
-		}
-
 		return signal, nil
 	}
 
-	// No signal - need to re-run (model not stored in execution, uses default)
-	return r.runAgent(exec.AgentName, exec.Prompt, "", exec)
+	// No signal in DB - need to re-run
+	return r.runAgent(exec.AgentName, exec.Prompt, exec.Model, exec)
 }
 
 
@@ -534,20 +518,19 @@ func (r *Runtime) luaPause(L *lua.LState) int {
 			// Already completed - return cached result
 			return r.pauseResultFromSignal(L, exec.OutputSignal)
 		} else if exec.Status == models.ExecStatusWaitingHuman {
-			// Still waiting - check if signal changed
-			signal, err := r.ws.ReadSignal("_checkpoint")
-			if err == nil {
-				if status, ok := signal["status"].(string); ok && status != string(models.SignalNeedsHuman) {
+			// Re-fetch to see if signal changed in DB
+			latest, err := r.storage.GetExecution(exec.ID)
+			if err == nil && latest != nil && latest.OutputSignal != nil {
+				if status, ok := latest.OutputSignal["status"].(string); ok && status != string(models.SignalNeedsHuman) {
 					// Human responded - complete the execution
 					completedAt := time.Now()
-					exec.CompletedAt = &completedAt
-					exec.OutputSignal = signal
-					exec.Status = models.ExecStatusComplete
-					if err := r.storage.UpdateExecution(exec); err != nil {
+					latest.CompletedAt = &completedAt
+					latest.Status = models.ExecStatusComplete
+					if err := r.storage.UpdateExecution(latest); err != nil {
 						L.RaiseError("failed to update execution: %v", err)
 						return 0
 					}
-					return r.pauseResultFromSignal(L, signal)
+					return r.pauseResultFromSignal(L, latest.OutputSignal)
 				}
 			}
 
@@ -637,18 +620,6 @@ func (r *Runtime) runCheckpoint(message string) (map[string]any, error) {
 		return nil, err
 	}
 
-	// Write run metadata
-	meta := &workspace.RunMetadata{
-		RunID:         r.run.ID,
-		WorkflowName:  r.run.WorkflowName,
-		InitialPrompt: r.run.InitialPrompt,
-		CurrentAgent:  agent,
-		Iteration:     r.callIndex,
-	}
-	if err := r.ws.WriteRunMetadata(meta); err != nil {
-		return nil, err
-	}
-
 	// Mark execution as running
 	now := time.Now()
 	exec.StartedAt = &now
@@ -670,16 +641,19 @@ func (r *Runtime) runCheckpoint(message string) (map[string]any, error) {
 
 	exec.ClaudeSessionID = result.SessionID
 
-	// Read signal
-	signal, err := r.ws.ReadSignal(agent)
-	if err != nil {
-		// No signal yet - write initial NEEDS_HUMAN signal
+	// Read signal from DB (written by MCP server's report_signal tool)
+	latest, _ := r.storage.GetExecution(exec.ID)
+	var signal map[string]any
+	if latest != nil && latest.OutputSignal != nil {
+		signal = latest.OutputSignal
+	} else {
+		// No signal written — checkpoint waits for human
 		signal = map[string]any{
 			"status": string(models.SignalNeedsHuman),
 			"reason": message,
 		}
-		if err := r.ws.WriteSignal(agent, signal); err != nil {
-			return nil, err
+		if err := r.storage.UpdateExecutionSignal(exec.ID, signal); err != nil {
+			return nil, fmt.Errorf("failed to write checkpoint signal: %w", err)
 		}
 	}
 
@@ -701,7 +675,7 @@ func (r *Runtime) runCheckpoint(message string) (map[string]any, error) {
 		return nil, fmt.Errorf("checkpoint paused: %s", message)
 	}
 
-	// Checkpoint completed immediately (shouldn't normally happen)
+	// Checkpoint completed immediately
 	completedAt := time.Now()
 	exec.CompletedAt = &completedAt
 	exec.OutputSignal = signal

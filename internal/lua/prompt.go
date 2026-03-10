@@ -14,10 +14,10 @@ func (r *Runtime) buildAgentPrompt(agent, prompt string) string {
 		result = r.run.InitialPrompt
 	}
 
-	// Direct agent to read context file for history
+	// Direct agent to fetch context from previous agents via MCP tool
 	if r.callIndex > 1 {
 		result += "\n\n---\n"
-		result += fmt.Sprintf("IMPORTANT: Read `%s` for context from previous agents before starting work.", r.ws.ContextPath())
+		result += "IMPORTANT: Call the `get_context` tool to retrieve context and summaries from previous agents before starting work."
 	}
 
 	result += fmt.Sprintf("\n\nYou are the '%s' agent in the '%s' workflow.", agent, r.run.WorkflowName)

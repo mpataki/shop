@@ -69,11 +69,6 @@ func (o *Orchestrator) StartRun(workflowPath, workflowName, prompt, sourceRepo s
 		return nil, fmt.Errorf("failed to update run with workspace path: %w", err)
 	}
 
-	// Initialize context file
-	if err := ws.InitContext(workflowName, prompt); err != nil {
-		return nil, fmt.Errorf("failed to initialize context: %w", err)
-	}
-
 	o.emit(models.Event{Type: models.EventRunStatusChanged, RunID: run.ID, Status: models.RunStatusPending})
 	return run, nil
 }
@@ -315,22 +310,19 @@ func (o *Orchestrator) TryResumeAfterHuman(runID int64) error {
 		return nil
 	}
 
-	ws, err := workspace.Open(o.workspaceDir, runID)
-	if err != nil {
+	exec, err := o.storage.GetWaitingExecutionForRun(runID)
+	if err != nil || exec == nil {
 		return nil
 	}
 
-	signal, err := ws.ReadSignal(run.CurrentAgent)
-	if err != nil {
+	if exec.OutputSignal == nil {
+		return nil
+	}
+	if status, ok := exec.OutputSignal["status"].(string); ok && status == string(models.SignalNeedsHuman) {
 		return nil
 	}
 
-	status, _ := signal["status"].(string)
-	if status == string(models.SignalNeedsHuman) {
-		return nil
-	}
-
-	// Resume in background so caller isn't blocked
+	// Signal changed — resume in background so caller isn't blocked
 	go o.Resume(runID)
 	return nil
 }

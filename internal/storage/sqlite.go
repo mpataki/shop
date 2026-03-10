@@ -10,7 +10,8 @@ import (
 )
 
 type Storage struct {
-	db *sql.DB
+	db     *sql.DB
+	dbPath string
 }
 
 func New(dbPath string) (*Storage, error) {
@@ -24,13 +25,17 @@ func New(dbPath string) (*Storage, error) {
 	db.Exec("PRAGMA journal_mode=WAL")
 	db.Exec("PRAGMA busy_timeout=5000")
 
-	s := &Storage{db: db}
+	s := &Storage{db: db, dbPath: dbPath}
 	if err := s.migrate(); err != nil {
 		db.Close()
 		return nil, err
 	}
 
 	return s, nil
+}
+
+func (s *Storage) DBPath() string {
+	return s.dbPath
 }
 
 func (s *Storage) Close() error {
@@ -385,6 +390,26 @@ func (s *Storage) GetWaitingExecutionForRun(runID int64) (*models.Execution, err
 		return nil, nil
 	}
 	return exec, err
+}
+
+// GetExecution fetches a single execution by ID.
+func (s *Storage) GetExecution(id int64) (*models.Execution, error) {
+	row := s.db.QueryRow(`SELECT `+execColumns+` FROM executions WHERE id = ?`, id)
+	exec, err := scanExecution(row)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	return exec, err
+}
+
+// UpdateExecutionSignal sets the output_signal for an execution (called by MCP server).
+func (s *Storage) UpdateExecutionSignal(execID int64, signal map[string]any) error {
+	data, err := json.Marshal(signal)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.Exec(`UPDATE executions SET output_signal = ? WHERE id = ?`, string(data), execID)
+	return err
 }
 
 // ListWaitingRuns returns runs that are waiting for human input

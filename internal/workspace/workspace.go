@@ -1,7 +1,6 @@
 package workspace
 
 import (
-	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -11,15 +10,6 @@ import (
 type Workspace struct {
 	Path     string
 	RepoPath string
-}
-
-type RunMetadata struct {
-	RunID          int64    `json:"run_id"`
-	WorkflowName   string   `json:"workflow_name"`
-	InitialPrompt  string   `json:"initial_prompt"`
-	CurrentAgent   string   `json:"current_agent"`
-	Iteration      int      `json:"iteration"`
-	PreviousAgents []string `json:"previous_agents"`
 }
 
 func Create(baseDir string, runID int64, sourceRepo string) (*Workspace, error) {
@@ -47,16 +37,9 @@ func Create(baseDir string, runID int64, sourceRepo string) (*Workspace, error) 
 		}
 	}
 
-	// Create orchestration directories as siblings to repo (keeps worktree clean)
-	dirs := []string{
-		filepath.Join(path, "signals"),
-		filepath.Join(path, "scratchpad"),
-	}
-
-	for _, dir := range dirs {
-		if err := os.MkdirAll(dir, 0755); err != nil {
-			return nil, fmt.Errorf("failed to create directory %s: %w", dir, err)
-		}
+	// Scratchpad lives as a sibling to repo (keeps worktree clean)
+	if err := os.MkdirAll(filepath.Join(path, "scratchpad"), 0755); err != nil {
+		return nil, fmt.Errorf("failed to create scratchpad directory: %w", err)
 	}
 
 	return w, nil
@@ -102,98 +85,12 @@ func Open(baseDir string, runID int64) (*Workspace, error) {
 	}, nil
 }
 
-func (w *Workspace) WriteRunMetadata(meta *RunMetadata) error {
-	path := filepath.Join(w.Path, "run.json")
-
-	data, err := json.MarshalIndent(meta, "", "  ")
-	if err != nil {
-		return fmt.Errorf("failed to marshal run metadata: %w", err)
-	}
-
-	if err := os.WriteFile(path, data, 0644); err != nil {
-		return fmt.Errorf("failed to write run.json: %w", err)
-	}
-
-	return nil
-}
-
-func (w *Workspace) SignalDir() string {
-	return filepath.Join(w.Path, "signals")
-}
-
-func (w *Workspace) ReadSignal(agentName string) (map[string]any, error) {
-	path := filepath.Join(w.Path, "signals", agentName+".json")
-
-	data, err := os.ReadFile(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, fmt.Errorf("signal file not found for agent %s", agentName)
-		}
-		return nil, fmt.Errorf("failed to read signal file: %w", err)
-	}
-
-	var signal map[string]any
-	if err := json.Unmarshal(data, &signal); err != nil {
-		return nil, fmt.Errorf("failed to parse signal JSON: %w", err)
-	}
-
-	return signal, nil
-}
-
-func (w *Workspace) WriteSignal(agentName string, signal map[string]any) error {
-	path := filepath.Join(w.Path, "signals", agentName+".json")
-
-	data, err := json.MarshalIndent(signal, "", "  ")
-	if err != nil {
-		return fmt.Errorf("failed to marshal signal: %w", err)
-	}
-
-	if err := os.WriteFile(path, data, 0644); err != nil {
-		return fmt.Errorf("failed to write signal file: %w", err)
-	}
-
-	return nil
-}
-
 func (w *Workspace) CreateAgentScratchpad(agentName string) error {
 	return os.MkdirAll(filepath.Join(w.Path, "scratchpad", agentName), 0755)
 }
 
 func (w *Workspace) ScratchpadPath(agentName string) string {
 	return filepath.Join(w.Path, "scratchpad", agentName)
-}
-
-func (w *Workspace) ContextPath() string {
-	return filepath.Join(w.Path, "context.md")
-}
-
-func (w *Workspace) InitContext(workflowName, prompt string) error {
-	path := filepath.Join(w.Path, "context.md")
-	content := fmt.Sprintf("# Run Context\n\n**Workflow:** %s\n\n**Task:** %s\n\n---\n\n", workflowName, prompt)
-	return os.WriteFile(path, []byte(content), 0644)
-}
-
-func (w *Workspace) AppendContext(agentName string, signal map[string]any) error {
-	path := filepath.Join(w.Path, "context.md")
-
-	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-
-	// Extract summary if present, otherwise use full signal
-	var entry string
-	if summary, ok := signal["summary"].(string); ok {
-		status, _ := signal["status"].(string)
-		entry = fmt.Sprintf("## %s\n\n**Status:** %s\n\n%s\n\n---\n\n", agentName, status, summary)
-	} else {
-		signalJSON, _ := json.MarshalIndent(signal, "", "  ")
-		entry = fmt.Sprintf("## %s\n\n```json\n%s\n```\n\n---\n\n", agentName, string(signalJSON))
-	}
-
-	_, err = f.WriteString(entry)
-	return err
 }
 
 func (w *Workspace) MCPConfigPath() string {
