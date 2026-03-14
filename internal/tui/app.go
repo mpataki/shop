@@ -94,11 +94,11 @@ func (a *App) waitForEvent() tea.Cmd {
 		if !ok {
 			return nil
 		}
-		return orchestratorEventMsg(event)
+		return orchestratorEventMsg{event}
 	}
 }
 
-type orchestratorEventMsg models.Event
+type orchestratorEventMsg struct{ event *models.WorkflowEvent }
 
 func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
@@ -117,31 +117,23 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, nil
 
 	case orchestratorEventMsg:
-		event := models.Event(msg)
+		e := msg.event
 		var cmds []tea.Cmd
 		cmds = append(cmds, a.waitForEvent())
 
-		// Append to activity log
-		if line := a.formatEventLog(event); line != "" {
+		if line := a.formatEventLog(e); line != "" {
 			a.appendLog(line)
 		}
 
-		switch event.Type {
-		case models.EventRunDeleted:
-			if a.view == ViewRunDetail && a.selectedRun != nil && event.RunID == a.selectedRun.ID {
-				a.view = ViewRunList
-				a.selectedRun = nil
-				a.executions = nil
-			}
-			cmds = append(cmds, a.loadRuns)
-		case models.EventLogMessage:
-			// Log-only event, no data reload needed
+		switch e.Type {
+		case models.WFEventLogMessage:
+			// Log-only — no data reload needed.
 		default:
 			switch a.view {
 			case ViewRunList:
 				cmds = append(cmds, a.loadRuns)
 			case ViewRunDetail:
-				if a.selectedRun != nil && event.RunID == a.selectedRun.ID {
+				if a.selectedRun != nil && e.RunID == a.selectedRun.ID {
 					cmds = append(cmds, a.loadRunDetail(a.selectedRun.ID))
 				}
 			}
@@ -414,19 +406,38 @@ func (a *App) appendLog(line string) {
 	}
 }
 
-func (a *App) formatEventLog(event models.Event) string {
-	switch event.Type {
-	case models.EventAgentStarted:
-		return fmt.Sprintf("#%d %s started", event.RunID, event.Agent)
-	case models.EventAgentCompleted:
-		return fmt.Sprintf("#%d %s completed", event.RunID, event.Agent)
-	case models.EventRunStatusChanged:
-		return fmt.Sprintf("#%d → %s", event.RunID, event.Status)
-	case models.EventLogMessage:
-		return fmt.Sprintf("#%d %s", event.RunID, event.Message)
-	default:
-		return ""
+func (a *App) formatEventLog(e *models.WorkflowEvent) string {
+	switch e.Type {
+	case models.WFEventAgentStarted:
+		return fmt.Sprintf("#%d %s started", e.RunID, e.AgentName)
+	case models.WFEventAgentCompleted:
+		return fmt.Sprintf("#%d %s completed", e.RunID, e.AgentName)
+	case models.WFEventAgentFailed:
+		return fmt.Sprintf("#%d %s failed", e.RunID, e.AgentName)
+	case models.WFEventRunCompleted:
+		return fmt.Sprintf("#%d completed", e.RunID)
+	case models.WFEventRunStuck:
+		if p, ok := e.Payload.(models.RunStuckPayload); ok && p.Reason != "" {
+			return fmt.Sprintf("#%d stuck: %s", e.RunID, p.Reason)
+		}
+		return fmt.Sprintf("#%d stuck", e.RunID)
+	case models.WFEventRunFailed:
+		if p, ok := e.Payload.(models.RunFailedPayload); ok && p.Error != "" {
+			return fmt.Sprintf("#%d failed: %s", e.RunID, p.Error)
+		}
+		return fmt.Sprintf("#%d failed", e.RunID)
+	case models.WFEventLogMessage:
+		if p, ok := e.Payload.(models.LogMessagePayload); ok {
+			return fmt.Sprintf("#%d %s", e.RunID, p.Message)
+		}
+	case models.WFEventCheckpointStarted:
+		if p, ok := e.Payload.(models.CheckpointStartedPayload); ok {
+			return fmt.Sprintf("#%d checkpoint: %s", e.RunID, p.Message)
+		}
+	case models.WFEventCheckpointResumed:
+		return fmt.Sprintf("#%d checkpoint resumed", e.RunID)
 	}
+	return ""
 }
 
 // ── Messages ──────────────────────────────────────────────────────────────────

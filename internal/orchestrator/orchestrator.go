@@ -18,24 +18,24 @@ import (
 type Orchestrator struct {
 	storage      *storage.Storage
 	workspaceDir string
-	events       chan models.Event
+	events       chan *models.WorkflowEvent
 }
 
 func New(store *storage.Storage, workspaceDir string) *Orchestrator {
 	return &Orchestrator{
 		storage:      store,
 		workspaceDir: workspaceDir,
-		events:       make(chan models.Event, 64),
+		events:       make(chan *models.WorkflowEvent, 64),
 	}
 }
 
-// Subscribe returns a read-only channel of orchestrator events.
-func (o *Orchestrator) Subscribe() <-chan models.Event {
+// Subscribe returns a read-only channel of workflow events.
+func (o *Orchestrator) Subscribe() <-chan *models.WorkflowEvent {
 	return o.events
 }
 
-// emit sends an event without blocking. Drops if the buffer is full.
-func (o *Orchestrator) emit(e models.Event) {
+// emit pushes an event to the TUI channel without blocking. Drops if buffer is full.
+func (o *Orchestrator) emit(e *models.WorkflowEvent) {
 	select {
 	case o.events <- e:
 	default:
@@ -69,7 +69,7 @@ func (o *Orchestrator) StartRun(workflowPath, workflowName, prompt, sourceRepo s
 		return nil, fmt.Errorf("failed to update run with workspace path: %w", err)
 	}
 
-	o.emit(models.Event{Type: models.EventRunStatusChanged, RunID: run.ID, Status: models.RunStatusPending})
+	o.emit(&models.WorkflowEvent{RunID: run.ID, Type: models.WFEventRunStarted, Payload: models.RunStartedPayload{}})
 	return run, nil
 }
 
@@ -87,7 +87,7 @@ func (o *Orchestrator) Execute(run *models.Run) error {
 		o.failRun(run, err)
 		return err
 	}
-	o.emit(models.Event{Type: models.EventRunStatusChanged, RunID: run.ID, Status: models.RunStatusRunning})
+	o.emit(&models.WorkflowEvent{RunID: run.ID, Type: models.WFEventAgentStarted, Payload: models.RunStartedPayload{}})
 
 	// Create and execute the Lua runtime
 	runtime := shopLua.NewRuntime(o.storage, run, ws, o.events)
@@ -116,7 +116,7 @@ func (o *Orchestrator) failRun(run *models.Run, err error) {
 	run.CompletedAt = &now
 	run.Error = err.Error()
 	o.storage.UpdateRun(run)
-	o.emit(models.Event{Type: models.EventRunStatusChanged, RunID: run.ID, Status: models.RunStatusFailed})
+	o.emit(&models.WorkflowEvent{RunID: run.ID, Type: models.WFEventRunFailed, Payload: models.RunFailedPayload{Error: err.Error()}})
 }
 
 // Resume resumes a Lua workflow from where it left off
@@ -136,7 +136,7 @@ func (o *Orchestrator) Resume(runID int64) error {
 	if err := o.storage.UpdateRun(run); err != nil {
 		return err
 	}
-	o.emit(models.Event{Type: models.EventRunStatusChanged, RunID: run.ID, Status: models.RunStatusRunning})
+	o.emit(&models.WorkflowEvent{RunID: run.ID, Type: models.WFEventRunStarted, Payload: models.RunStartedPayload{}})
 
 	return o.Execute(run)
 }
@@ -194,7 +194,7 @@ func (o *Orchestrator) KillRun(runID int64) error {
 	if err := o.storage.UpdateRun(run); err != nil {
 		return err
 	}
-	o.emit(models.Event{Type: models.EventRunStatusChanged, RunID: run.ID, Status: models.RunStatusFailed})
+	o.emit(&models.WorkflowEvent{RunID: run.ID, Type: models.WFEventRunFailed, Payload: models.RunFailedPayload{Error: "killed"}})
 	return nil
 }
 
@@ -236,7 +236,7 @@ func (o *Orchestrator) DeleteRun(runID int64) error {
 	if err := o.storage.DeleteRun(runID); err != nil {
 		return err
 	}
-	o.emit(models.Event{Type: models.EventRunDeleted, RunID: runID})
+	// Deletion is handled by the runDeletedMsg command path in the TUI; no channel event needed.
 	return nil
 }
 
@@ -298,12 +298,14 @@ func (o *Orchestrator) StopRun(runID int64, reason string) error {
 	if err := o.storage.UpdateRun(run); err != nil {
 		return err
 	}
-	o.emit(models.Event{Type: models.EventRunStatusChanged, RunID: run.ID, Status: models.RunStatusStuck})
+	o.emit(&models.WorkflowEvent{RunID: run.ID, Type: models.WFEventRunStuck, Payload: models.RunStuckPayload{Reason: run.Error}})
 	return nil
 }
 
 // TryResumeAfterHuman checks if a waiting run's signal changed and auto-resumes if so.
 // Returns nil (no-op) if the run isn't waiting or the signal hasn't changed.
+// When the signal has changed, it appends an authoritative workflow event so that the
+// next Execute() loads the updated signal from the replay cache.
 func (o *Orchestrator) TryResumeAfterHuman(runID int64) error {
 	run, err := o.storage.GetRun(runID)
 	if err != nil || run.Status != models.RunStatusWaitingHuman {
@@ -322,7 +324,37 @@ func (o *Orchestrator) TryResumeAfterHuman(runID int64) error {
 		return nil
 	}
 
-	// Signal changed — resume in background so caller isn't blocked
+	// Signal changed — append the authoritative event before resuming.
+	// This ensures the replay cache in Execute() has the updated result for this call_index,
+	// so the workflow doesn't re-suspend on the same NEEDS_HUMAN signal.
+	callIndex := exec.CallIndex
+	signal := exec.OutputSignal
+	if exec.AgentName == "_checkpoint" {
+		var cont bool
+		var reason, message string
+		if s, ok := signal["status"].(string); ok {
+			cont = s == string(models.SignalContinue)
+		}
+		reason, _ = signal["reason"].(string)
+		message, _ = signal["message"].(string)
+		o.storage.AppendWorkflowEvent(&models.WorkflowEvent{ //nolint:errcheck
+			RunID:     runID,
+			Type:      models.WFEventCheckpointResumed,
+			CallIndex: &callIndex,
+			AgentName: exec.AgentName,
+			Payload:   models.CheckpointResumedPayload{Continue: cont, Reason: reason, Message: message},
+		})
+	} else {
+		o.storage.AppendWorkflowEvent(&models.WorkflowEvent{ //nolint:errcheck
+			RunID:     runID,
+			Type:      models.WFEventAgentCompleted,
+			CallIndex: &callIndex,
+			AgentName: exec.AgentName,
+			Payload:   models.AgentCompletedPayload{Signal: signal},
+		})
+	}
+
+	// Resume in background so caller isn't blocked.
 	go o.Resume(runID)
 	return nil
 }

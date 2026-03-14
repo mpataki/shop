@@ -70,8 +70,19 @@ func (s *Storage) migrate() error {
 		UNIQUE(run_id, sequence_num)
 	);
 
+	CREATE TABLE IF NOT EXISTS workflow_events (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		run_id INTEGER NOT NULL REFERENCES runs(id),
+		event_type TEXT NOT NULL,
+		call_index INTEGER,
+		agent_name TEXT,
+		payload TEXT NOT NULL DEFAULT '{}',
+		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+	);
+
 	CREATE INDEX IF NOT EXISTS idx_runs_status ON runs(status);
 	CREATE INDEX IF NOT EXISTS idx_executions_run ON executions(run_id);
+	CREATE INDEX IF NOT EXISTS idx_workflow_events_run ON workflow_events(run_id, created_at);
 	`
 
 	if _, err := s.db.Exec(schema); err != nil {
@@ -330,6 +341,9 @@ func (s *Storage) DeleteRun(id int64) error {
 	}
 	defer tx.Rollback()
 
+	if _, err := tx.Exec(`DELETE FROM workflow_events WHERE run_id = ?`, id); err != nil {
+		return err
+	}
 	if _, err := tx.Exec(`DELETE FROM executions WHERE run_id = ?`, id); err != nil {
 		return err
 	}
@@ -434,3 +448,4 @@ func (s *Storage) ListWaitingRuns() ([]*models.Run, error) {
 
 	return runs, rows.Err()
 }
+
