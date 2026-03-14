@@ -1,4 +1,4 @@
-package models
+package events
 
 // SignalStatus represents the completion status an agent reports via report_signal.
 type SignalStatus string

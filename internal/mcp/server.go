@@ -7,25 +7,23 @@ import (
 	"os"
 	"strings"
 
-	"github.com/mpataki/shop/internal/models"
-	"github.com/mpataki/shop/internal/storage"
+	"github.com/mpataki/shop/internal/commands"
+	"github.com/mpataki/shop/internal/events"
 )
 
 // Server implements a minimal MCP server over stdio.
 // It exposes report_signal, get_context, and get_run_info tools for agents.
 type Server struct {
-	agentName string
 	dbPath    string
 	runID     int64
-	execID    int64
+	callIndex int
 }
 
-func NewServer(agentName, dbPath string, runID, execID int64) *Server {
+func NewServer(dbPath string, runID int64, callIndex int) *Server {
 	return &Server{
-		agentName: agentName,
 		dbPath:    dbPath,
 		runID:     runID,
-		execID:    execID,
+		callIndex: callIndex,
 	}
 }
 
@@ -51,12 +49,11 @@ type rpcError struct {
 // Run starts the MCP server, reading JSON-RPC messages from stdin
 // and writing responses to stdout. Exits when stdin is closed.
 func (s *Server) Run() error {
-	var store *storage.Storage
+	var store *events.Store
 	if s.dbPath != "" {
 		var err error
-		store, err = storage.New(s.dbPath)
+		store, err = events.NewStore(s.dbPath)
 		if err != nil {
-			// Log to stderr (not stdout — that's the MCP protocol channel)
 			fmt.Fprintf(os.Stderr, "shop mcp-server: failed to open db: %v\n", err)
 		} else {
 			defer store.Close()
@@ -72,7 +69,6 @@ func (s *Server) Run() error {
 			continue
 		}
 
-		// Notifications (no ID) don't get a response
 		if req.ID == nil {
 			continue
 		}
@@ -124,7 +120,7 @@ func (s *Server) handleToolsList() map[string]any {
 					"properties": map[string]any{
 						"status": map[string]any{
 							"type":        "string",
-							"enum":        models.ValidAgentStatusStrings(),
+							"enum":        events.ValidAgentStatusStrings(),
 							"description": "Your completion status",
 						},
 						"summary": map[string]any{
@@ -159,7 +155,7 @@ func (s *Server) handleToolsList() map[string]any {
 	}
 }
 
-func (s *Server) handleToolsCall(params json.RawMessage, store *storage.Storage) map[string]any {
+func (s *Server) handleToolsCall(params json.RawMessage, store *events.Store) map[string]any {
 	var call struct {
 		Name      string         `json:"name"`
 		Arguments map[string]any `json:"arguments"`
@@ -181,19 +177,29 @@ func (s *Server) handleToolsCall(params json.RawMessage, store *storage.Storage)
 	}
 }
 
-func (s *Server) handleReportSignal(args map[string]any, store *storage.Storage) map[string]any {
+func (s *Server) handleReportSignal(args map[string]any, store *events.Store) map[string]any {
 	statusStr, _ := args["status"].(string)
-	status := models.SignalStatus(statusStr)
+	status := events.SignalStatus(statusStr)
 	if !status.IsValid() {
-		return toolError(fmt.Sprintf("invalid status %q, must be one of: %v", statusStr, models.ValidAgentStatusStrings()))
+		return toolError(fmt.Sprintf("invalid status %q, must be one of: %v", statusStr, events.ValidAgentStatusStrings()))
 	}
 
-	if store == nil || s.execID == 0 {
+	if store == nil {
 		return toolError("MCP server not connected to database; cannot write signal")
 	}
 
-	if err := store.UpdateExecutionSignal(s.execID, args); err != nil {
-		return toolError("failed to write signal to database: " + err.Error())
+	// Submit a ReportSignal command
+	cmd, err := commands.NewCommand(s.runID, commands.CmdReportSignal, commands.ReportSignalPayload{
+		CallIndex: s.callIndex,
+		Status:    statusStr,
+		Signal:    args,
+	})
+	if err != nil {
+		return toolError("failed to create command: " + err.Error())
+	}
+
+	if err := store.SubmitCommand(cmd.ID, cmd.RunID, string(cmd.Type), cmd.Payload); err != nil {
+		return toolError("failed to submit signal command: " + err.Error())
 	}
 
 	return map[string]any{
@@ -206,40 +212,34 @@ func (s *Server) handleReportSignal(args map[string]any, store *storage.Storage)
 	}
 }
 
-func (s *Server) handleGetContext(store *storage.Storage) map[string]any {
+func (s *Server) handleGetContext(store *events.Store) map[string]any {
 	if store == nil {
 		return toolError("MCP server not connected to database")
 	}
 
-	run, err := store.GetRun(s.runID)
+	state, err := store.ProjectRunFromDB(s.runID)
 	if err != nil {
 		return toolError("failed to get run: " + err.Error())
 	}
 
-	execs, err := store.GetExecutionsForRun(s.runID)
-	if err != nil {
-		return toolError("failed to get executions: " + err.Error())
-	}
-
 	var sb strings.Builder
-	fmt.Fprintf(&sb, "# Run Context\n\n**Workflow:** %s\n**Task:** %s\n\n---\n\n", run.WorkflowName, run.InitialPrompt)
+	fmt.Fprintf(&sb, "# Run Context\n\n**Workflow:** %s\n**Task:** %s\n\n---\n\n", state.WorkflowName, state.InitialPrompt)
 
-	for _, exec := range execs {
-		if exec.ID == s.execID {
-			continue // skip the current execution's own (not-yet-complete) signal
+	for _, exec := range state.Executions {
+		if exec.CallIndex == s.callIndex {
+			continue // skip current execution
 		}
-		if exec.OutputSignal == nil {
+		if exec.Signal == nil {
 			continue
 		}
-		agentStatus, _ := exec.OutputSignal["status"].(string)
+		agentStatus, _ := exec.Signal["status"].(string)
 		if agentStatus == "" {
 			continue
 		}
-		if summary, ok := exec.OutputSignal["summary"].(string); ok && summary != "" {
+		if summary, ok := exec.Signal["summary"].(string); ok && summary != "" {
 			fmt.Fprintf(&sb, "## %s\n\n**Status:** %s\n\n%s\n\n---\n\n", exec.AgentName, agentStatus, summary)
 		} else {
-			// Fallback: dump full signal JSON so no information is lost
-			signalJSON, _ := json.MarshalIndent(exec.OutputSignal, "", "  ")
+			signalJSON, _ := json.MarshalIndent(exec.Signal, "", "  ")
 			fmt.Fprintf(&sb, "## %s\n\n**Status:** %s\n\n```json\n%s\n```\n\n---\n\n", exec.AgentName, agentStatus, string(signalJSON))
 		}
 	}
@@ -254,18 +254,18 @@ func (s *Server) handleGetContext(store *storage.Storage) map[string]any {
 	}
 }
 
-func (s *Server) handleGetRunInfo(store *storage.Storage) map[string]any {
+func (s *Server) handleGetRunInfo(store *events.Store) map[string]any {
 	if store == nil {
 		return toolError("MCP server not connected to database")
 	}
 
-	run, err := store.GetRun(s.runID)
+	state, err := store.ProjectRunFromDB(s.runID)
 	if err != nil {
 		return toolError("failed to get run: " + err.Error())
 	}
 
 	info := fmt.Sprintf("Run ID: %d\nWorkflow: %s\nStatus: %s\nCurrent Agent: %s\nInitial Prompt: %s",
-		run.ID, run.WorkflowName, run.Status, run.CurrentAgent, run.InitialPrompt)
+		state.ID, state.WorkflowName, state.Status, state.CurrentAgent, state.InitialPrompt)
 
 	return map[string]any{
 		"content": []map[string]any{

@@ -14,9 +14,9 @@ import (
 	"github.com/charmbracelet/bubbles/textarea"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/mpataki/shop/internal/commands"
 	"github.com/mpataki/shop/internal/config"
-	"github.com/mpataki/shop/internal/models"
-	"github.com/mpataki/shop/internal/orchestrator"
+	"github.com/mpataki/shop/internal/events"
 )
 
 type View int
@@ -29,14 +29,14 @@ const (
 )
 
 type App struct {
-	orchestrator *orchestrator.Orchestrator
-	config       *config.Config
+	processor *commands.Processor
+	store     *events.Store
+	config    *config.Config
 
 	view            View
-	runs            []*models.Run
+	runs            []*events.RunState
 	selectedIdx     int
-	selectedRun     *models.Run
-	executions      []*models.Execution
+	selectedRun     *events.RunState
 	selectedExecIdx int
 	outputContent   string
 
@@ -54,11 +54,11 @@ type App struct {
 
 const maxLogs = 6
 
-func NewApp(orch *orchestrator.Orchestrator, cfg *config.Config) *App {
+func NewApp(proc *commands.Processor, store *events.Store, cfg *config.Config) *App {
 	ti := textarea.New()
 	ti.Placeholder = "what should the agents do?"
 	ti.CharLimit = 2000
-	ti.MaxHeight = 0 // no max, grows freely
+	ti.MaxHeight = 0
 	ti.ShowLineNumbers = false
 	ti.Prompt = "  "
 	ti.FocusedStyle.CursorLine = lipgloss.NewStyle()
@@ -74,11 +74,12 @@ func NewApp(orch *orchestrator.Orchestrator, cfg *config.Config) *App {
 	sp.Style = statusRunningStyle
 
 	return &App{
-		orchestrator: orch,
-		config:       cfg,
-		view:         ViewRunList,
-		promptInput:  ti,
-		spinner:      sp,
+		processor:   proc,
+		store:       store,
+		config:      cfg,
+		view:        ViewRunList,
+		promptInput: ti,
+		spinner:     sp,
 	}
 }
 
@@ -86,19 +87,18 @@ func (a *App) Init() tea.Cmd {
 	return tea.Batch(a.loadRuns, a.waitForEvent(), a.spinner.Tick)
 }
 
-// waitForEvent blocks on the orchestrator event channel and delivers events as tea messages.
 func (a *App) waitForEvent() tea.Cmd {
-	ch := a.orchestrator.Subscribe()
+	ch := a.processor.Subscribe()
 	return func() tea.Msg {
 		event, ok := <-ch
 		if !ok {
 			return nil
 		}
-		return orchestratorEventMsg{event}
+		return processorEventMsg{event}
 	}
 }
 
-type orchestratorEventMsg struct{ event *models.WorkflowEvent }
+type processorEventMsg struct{ event events.Event }
 
 func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
@@ -116,7 +116,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.promptInput.SetWidth(a.promptBoxInnerWidth())
 		return a, nil
 
-	case orchestratorEventMsg:
+	case processorEventMsg:
 		e := msg.event
 		var cmds []tea.Cmd
 		cmds = append(cmds, a.waitForEvent())
@@ -125,8 +125,8 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.appendLog(line)
 		}
 
-		switch e.Type {
-		case models.WFEventLogMessage:
+		switch e.EventType {
+		case events.EventLogMessage:
 			// Log-only — no data reload needed.
 		default:
 			switch a.view {
@@ -146,8 +146,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, nil
 
 	case runDetailMsg:
-		a.selectedRun = msg.run
-		a.executions = msg.executions
+		a.selectedRun = msg.state
 		a.err = msg.err
 		if a.err == nil {
 			a.view = ViewRunDetail
@@ -267,7 +266,7 @@ func (a *App) handleRunListKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "c":
 		if len(a.runs) > 0 && a.selectedIdx < len(a.runs) {
 			run := a.runs[a.selectedIdx]
-			if run.Status == models.RunStatusWaitingHuman && run.WaitingSessionID != "" {
+			if run.Status == events.RunStatusWaitingHuman && run.WaitingSessionID != "" {
 				return a, a.continueSession(run.ID, run.WaitingSessionID, run.WorkspacePath+"/repo")
 			}
 		}
@@ -282,46 +281,45 @@ func (a *App) handleRunDetailKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "esc", "h":
 		a.view = ViewRunList
 		a.selectedRun = nil
-		a.executions = nil
 		a.selectedExecIdx = 0
 	case "up", "k":
 		if a.selectedExecIdx > 0 {
 			a.selectedExecIdx--
 		}
 	case "down", "j":
-		if a.selectedExecIdx < len(a.executions)-1 {
+		if a.selectedRun != nil && a.selectedExecIdx < len(a.selectedRun.Executions)-1 {
 			a.selectedExecIdx++
 		}
 	case "G":
-		if len(a.executions) > 0 {
-			a.selectedExecIdx = len(a.executions) - 1
+		if a.selectedRun != nil && len(a.selectedRun.Executions) > 0 {
+			a.selectedExecIdx = len(a.selectedRun.Executions) - 1
 		}
 	case "g":
 		a.selectedExecIdx = 0
 	case "enter", "l":
-		if len(a.executions) > 0 && a.selectedExecIdx < len(a.executions) {
-			exec := a.executions[a.selectedExecIdx]
-			if exec.ClaudeSessionID != "" && a.selectedRun != nil {
+		if a.selectedRun != nil && len(a.selectedRun.Executions) > 0 && a.selectedExecIdx < len(a.selectedRun.Executions) {
+			exec := a.selectedRun.Executions[a.selectedExecIdx]
+			if exec.SessionID != "" {
 				workDir := filepath.Join(a.selectedRun.WorkspacePath, "repo")
-				return a, a.resumeSession(exec.ClaudeSessionID, workDir)
+				return a, a.resumeSession(exec.SessionID, workDir)
 			}
 		}
 	case "o":
-		if len(a.executions) > 0 && a.selectedExecIdx < len(a.executions) {
-			exec := a.executions[a.selectedExecIdx]
-			if exec.ClaudeSessionID != "" && a.selectedRun != nil {
-				return a, a.loadOutput(exec.ClaudeSessionID, a.selectedRun.WorkspacePath)
+		if a.selectedRun != nil && len(a.selectedRun.Executions) > 0 && a.selectedExecIdx < len(a.selectedRun.Executions) {
+			exec := a.selectedRun.Executions[a.selectedExecIdx]
+			if exec.SessionID != "" {
+				return a, a.loadOutput(exec.SessionID, a.selectedRun.WorkspacePath)
 			}
 		}
 	case "c":
-		if a.selectedRun != nil && a.selectedRun.Status == models.RunStatusWaitingHuman {
+		if a.selectedRun != nil && a.selectedRun.Status == events.RunStatusWaitingHuman {
 			if a.selectedRun.WaitingSessionID != "" {
 				workDir := a.selectedRun.WorkspacePath + "/repo"
 				return a, a.continueSession(a.selectedRun.ID, a.selectedRun.WaitingSessionID, workDir)
 			}
 		}
 	case "s":
-		if a.selectedRun != nil && a.selectedRun.Status == models.RunStatusWaitingHuman {
+		if a.selectedRun != nil && a.selectedRun.Status == events.RunStatusWaitingHuman {
 			return a, a.stopRun(a.selectedRun.ID)
 		}
 	}
@@ -354,7 +352,6 @@ func (a *App) handleNewRunKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 			return a, nil
 		case "alt+enter":
-			// Insert newline
 			a.promptInput.InsertString("\n")
 			a.resizePromptInput()
 			return a, nil
@@ -388,7 +385,6 @@ func (a *App) handleNewRunKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return a, nil
 }
 
-// resizePromptInput adjusts the textarea height to fit its content (min 1 line).
 func (a *App) resizePromptInput() {
 	lines := strings.Count(a.promptInput.Value(), "\n") + 1
 	if lines < 1 {
@@ -406,35 +402,38 @@ func (a *App) appendLog(line string) {
 	}
 }
 
-func (a *App) formatEventLog(e *models.WorkflowEvent) string {
-	switch e.Type {
-	case models.WFEventAgentStarted:
-		return fmt.Sprintf("#%d %s started", e.RunID, e.AgentName)
-	case models.WFEventAgentCompleted:
-		return fmt.Sprintf("#%d %s completed", e.RunID, e.AgentName)
-	case models.WFEventAgentFailed:
-		return fmt.Sprintf("#%d %s failed", e.RunID, e.AgentName)
-	case models.WFEventRunCompleted:
+func (a *App) formatEventLog(e events.Event) string {
+	switch e.EventType {
+	case events.EventAgentStarted:
+		p, _ := events.DecodePayload[events.AgentStartedPayload](e)
+		return fmt.Sprintf("#%d %s started", e.RunID, p.AgentName)
+	case events.EventAgentCompleted:
+		p, _ := events.DecodePayload[events.AgentCompletedPayload](e)
+		return fmt.Sprintf("#%d %s completed", e.RunID, p.AgentName)
+	case events.EventAgentFailed:
+		p, _ := events.DecodePayload[events.AgentFailedPayload](e)
+		return fmt.Sprintf("#%d %s failed", e.RunID, p.AgentName)
+	case events.EventRunCompleted:
 		return fmt.Sprintf("#%d completed", e.RunID)
-	case models.WFEventRunStuck:
-		if p, ok := e.Payload.(models.RunStuckPayload); ok && p.Reason != "" {
+	case events.EventRunStuck:
+		p, _ := events.DecodePayload[events.RunStuckPayload](e)
+		if p.Reason != "" {
 			return fmt.Sprintf("#%d stuck: %s", e.RunID, p.Reason)
 		}
 		return fmt.Sprintf("#%d stuck", e.RunID)
-	case models.WFEventRunFailed:
-		if p, ok := e.Payload.(models.RunFailedPayload); ok && p.Error != "" {
+	case events.EventRunFailed:
+		p, _ := events.DecodePayload[events.RunFailedPayload](e)
+		if p.Error != "" {
 			return fmt.Sprintf("#%d failed: %s", e.RunID, p.Error)
 		}
 		return fmt.Sprintf("#%d failed", e.RunID)
-	case models.WFEventLogMessage:
-		if p, ok := e.Payload.(models.LogMessagePayload); ok {
-			return fmt.Sprintf("#%d %s", e.RunID, p.Message)
-		}
-	case models.WFEventCheckpointStarted:
-		if p, ok := e.Payload.(models.CheckpointStartedPayload); ok {
-			return fmt.Sprintf("#%d checkpoint: %s", e.RunID, p.Message)
-		}
-	case models.WFEventCheckpointResumed:
+	case events.EventLogMessage:
+		p, _ := events.DecodePayload[events.LogMessagePayload](e)
+		return fmt.Sprintf("#%d %s", e.RunID, p.Message)
+	case events.EventCheckpointStarted:
+		p, _ := events.DecodePayload[events.CheckpointStartedPayload](e)
+		return fmt.Sprintf("#%d checkpoint: %s", e.RunID, p.Message)
+	case events.EventCheckpointCompleted:
 		return fmt.Sprintf("#%d checkpoint resumed", e.RunID)
 	}
 	return ""
@@ -443,14 +442,13 @@ func (a *App) formatEventLog(e *models.WorkflowEvent) string {
 // ── Messages ──────────────────────────────────────────────────────────────────
 
 type runsLoadedMsg struct {
-	runs []*models.Run
+	runs []*events.RunState
 	err  error
 }
 
 type runDetailMsg struct {
-	run        *models.Run
-	executions []*models.Execution
-	err        error
+	state *events.RunState
+	err   error
 }
 
 type runKilledMsg struct {
@@ -460,7 +458,7 @@ type runKilledMsg struct {
 
 type sessionResumedMsg struct {
 	sessionID string
-	runID     int64 // non-zero if this was a continue session (triggers auto-resume)
+	runID     int64
 	err       error
 }
 
@@ -492,44 +490,71 @@ type runStartedMsg struct {
 // ── Commands ──────────────────────────────────────────────────────────────────
 
 func (a *App) loadRuns() tea.Msg {
-	runs, err := a.orchestrator.ListRuns(20)
-	return runsLoadedMsg{runs: runs, err: err}
+	infos, err := a.store.ListRunIDs(20)
+	if err != nil {
+		return runsLoadedMsg{err: err}
+	}
+
+	var runs []*events.RunState
+	for _, info := range infos {
+		evts, err := a.store.GetEvents(info.ID)
+		if err != nil {
+			continue
+		}
+		state := events.ProjectRun(info.ID, info.CreatedAt, evts)
+		if state.Status != events.RunStatusDeleted {
+			runs = append(runs, state)
+		}
+	}
+
+	return runsLoadedMsg{runs: runs}
 }
 
 func (a *App) loadRunDetail(id int64) tea.Cmd {
 	return func() tea.Msg {
-		run, err := a.orchestrator.GetRun(id)
+		state, err := a.store.ProjectRunFromDB(id)
 		if err != nil {
 			return runDetailMsg{err: err}
 		}
-		execs, err := a.orchestrator.GetExecutionsForRun(id)
-		return runDetailMsg{run: run, executions: execs, err: err}
+		return runDetailMsg{state: state}
 	}
 }
 
 func (a *App) killRun(id int64) tea.Cmd {
 	return func() tea.Msg {
-		if err := a.orchestrator.KillRun(id); err != nil {
+		cmd, err := commands.NewCommand(id, commands.CmdKillRun, commands.KillRunPayload{})
+		if err != nil {
 			return runKilledMsg{err: err}
 		}
+		a.processor.SubmitCommand(cmd)
+		done := a.processor.ProcessRunSync(id)
+		<-done
 		return runKilledMsg{runID: id}
 	}
 }
 
 func (a *App) deleteRun(id int64) tea.Cmd {
 	return func() tea.Msg {
-		if err := a.orchestrator.DeleteRun(id); err != nil {
+		cmd, err := commands.NewCommand(id, commands.CmdDeleteRun, commands.DeleteRunPayload{})
+		if err != nil {
 			return runDeletedMsg{err: err}
 		}
+		a.processor.SubmitCommand(cmd)
+		done := a.processor.ProcessRunSync(id)
+		<-done
 		return runDeletedMsg{runID: id}
 	}
 }
 
 func (a *App) stopRun(id int64) tea.Cmd {
 	return func() tea.Msg {
-		if err := a.orchestrator.StopRun(id, "Stopped from TUI"); err != nil {
+		cmd, err := commands.NewCommand(id, commands.CmdStopRun, commands.StopRunPayload{Reason: "Stopped from TUI"})
+		if err != nil {
 			return runStoppedMsg{err: err}
 		}
+		a.processor.SubmitCommand(cmd)
+		done := a.processor.ProcessRunSync(id)
+		<-done
 		return runStoppedMsg{runID: id}
 	}
 }
@@ -552,8 +577,8 @@ func (a *App) continueSession(runID int64, sessionID string, workDir string) tea
 
 func (a *App) tryResumeAfterHuman(runID int64) tea.Cmd {
 	return func() tea.Msg {
-		a.orchestrator.TryResumeAfterHuman(runID)
-		return nil // events drive TUI updates
+		a.processor.TryResumeAfterHuman(runID)
+		return nil
 	}
 }
 
@@ -637,12 +662,24 @@ func (a *App) startNewRun() tea.Cmd {
 			return runStartedMsg{err: fmt.Errorf("failed to get working directory: %w", err)}
 		}
 
-		run, err := a.orchestrator.StartRun(wf.Path, wf.Name, prompt, cwd)
+		runID, err := a.store.CreateRun()
 		if err != nil {
 			return runStartedMsg{err: err}
 		}
 
-		go a.orchestrator.Execute(run)
-		return runStartedMsg{runID: run.ID}
+		cmd, err := commands.NewCommand(runID, commands.CmdStartRun, commands.StartRunPayload{
+			WorkflowPath:  wf.Path,
+			WorkflowName:  wf.Name,
+			InitialPrompt: prompt,
+			SourceRepo:    cwd,
+		})
+		if err != nil {
+			return runStartedMsg{err: err}
+		}
+
+		a.processor.SubmitCommand(cmd)
+		a.processor.ProcessRunSync(runID) // starts the goroutine
+
+		return runStartedMsg{runID: runID}
 	}
 }

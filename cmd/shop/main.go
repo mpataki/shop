@@ -7,16 +7,15 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/mpataki/shop/internal/commands"
 	"github.com/mpataki/shop/internal/config"
-	shopLua "github.com/mpataki/shop/internal/lua"
+	"github.com/mpataki/shop/internal/events"
 	"github.com/mpataki/shop/internal/mcp"
-	"github.com/mpataki/shop/internal/models"
-	"github.com/mpataki/shop/internal/orchestrator"
-	"github.com/mpataki/shop/internal/storage"
+	"github.com/mpataki/shop/internal/process"
 	"github.com/mpataki/shop/internal/tui"
+	"github.com/mpataki/shop/internal/workflow"
 	"github.com/spf13/cobra"
 )
 
@@ -53,15 +52,17 @@ func runTUI(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to create data directory: %w", err)
 	}
 
-	store, err := storage.New(cfg.DBPath)
+	store, err := events.NewStore(cfg.DBPath)
 	if err != nil {
 		return fmt.Errorf("failed to open database: %w", err)
 	}
 	defer store.Close()
 
-	orch := orchestrator.New(store, cfg.WorkspacesDir())
+	pm := process.NewCLIManager()
+	proc := commands.NewProcessor(store, pm, cfg.WorkspacesDir())
+	proc.Start()
 
-	app := tui.NewApp(orch, cfg)
+	app := tui.NewApp(proc, store, cfg)
 	p := tea.NewProgram(app, tea.WithAltScreen())
 
 	_, err = p.Run()
@@ -83,26 +84,77 @@ func newRunCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
-
 			if err := cfg.EnsureDataDir(); err != nil {
 				return err
 			}
 
-			store, err := storage.New(cfg.DBPath)
+			store, err := events.NewStore(cfg.DBPath)
 			if err != nil {
 				return err
 			}
 			defer store.Close()
 
-			orch := orchestrator.New(store, cfg.WorkspacesDir())
-
-			// Find workflow
 			workflowPath := findWorkflow(workflowName, cfg)
 			if workflowPath == "" {
 				return fmt.Errorf("workflow %q not found (looked in %s and %s)", workflowName, cfg.ProjectWorkflowDir, cfg.UserWorkflowDir)
 			}
 
-			return runWorkflow(orch, workflowPath, workflowName, prompt, repoPath, noExec)
+			if !workflow.IsWorkflow(workflowPath) {
+				return fmt.Errorf("not a Lua workflow: %s", workflowPath)
+			}
+
+			// Create run
+			runID, err := store.CreateRun()
+			if err != nil {
+				return fmt.Errorf("failed to create run: %w", err)
+			}
+
+			fmt.Printf("Created run #%d\n", runID)
+
+			if noExec {
+				fmt.Println("Skipping execution (--no-exec)")
+				return nil
+			}
+
+			// Create processor and submit StartRun command
+			pm := process.NewCLIManager()
+			proc := commands.NewProcessor(store, pm, cfg.WorkspacesDir())
+
+			startCmd, err := commands.NewCommand(runID, commands.CmdStartRun, commands.StartRunPayload{
+				WorkflowPath:  workflowPath,
+				WorkflowName:  workflowName,
+				InitialPrompt: prompt,
+				SourceRepo:    repoPath,
+			})
+			if err != nil {
+				return err
+			}
+
+			if err := proc.SubmitCommand(startCmd); err != nil {
+				return err
+			}
+
+			fmt.Printf("Executing workflow %q...\n", workflowName)
+
+			// Wait for terminal state
+			done := proc.ProcessRunSync(runID)
+			<-done
+
+			// Print final status
+			state, err := store.ProjectRunFromDB(runID)
+			if err != nil {
+				return err
+			}
+			fmt.Printf("Run completed with status: %s\n", state.Status)
+			if state.Error != "" {
+				fmt.Printf("Error: %s\n", state.Error)
+			}
+			if state.Status == events.RunStatusWaitingHuman {
+				fmt.Printf("Waiting: %s\n", state.WaitingReason)
+				fmt.Printf("\nUse 'shop continue %d' to open the Claude session.\n", runID)
+			}
+
+			return nil
 		},
 	}
 
@@ -111,13 +163,10 @@ func newRunCommand() *cobra.Command {
 	return cmd
 }
 
-// findWorkflow looks for a Lua workflow file in the standard locations
 func findWorkflow(name string, cfg *config.Config) string {
-	// Check project directory first (.shop/workflows/)
 	dirs := []string{cfg.ProjectWorkflowDir, cfg.UserWorkflowDir}
 
 	for _, dir := range dirs {
-		// Try exact name if it ends with .lua
 		if strings.HasSuffix(name, ".lua") {
 			path := filepath.Join(dir, name)
 			if _, err := os.Stat(path); err == nil {
@@ -125,7 +174,6 @@ func findWorkflow(name string, cfg *config.Config) string {
 			}
 		}
 
-		// Try adding .lua extension
 		path := filepath.Join(dir, name+".lua")
 		if _, err := os.Stat(path); err == nil {
 			return path
@@ -133,48 +181,6 @@ func findWorkflow(name string, cfg *config.Config) string {
 	}
 
 	return ""
-}
-
-// runWorkflow runs a Lua workflow
-func runWorkflow(orch *orchestrator.Orchestrator, workflowPath, workflowName, prompt, repoPath string, noExec bool) error {
-	// Verify it's a valid Lua workflow
-	if !shopLua.IsWorkflow(workflowPath) {
-		return fmt.Errorf("not a Lua workflow: %s", workflowPath)
-	}
-
-	run, err := orch.StartRun(workflowPath, workflowName, prompt, repoPath)
-	if err != nil {
-		return fmt.Errorf("failed to start run: %w", err)
-	}
-
-	fmt.Printf("Created run #%d\n", run.ID)
-	fmt.Printf("Workspace: %s\n", run.WorkspacePath)
-	fmt.Printf("Workflow: %s\n", workflowPath)
-
-	if noExec {
-		fmt.Println("Skipping execution (--no-exec)")
-		return nil
-	}
-
-	fmt.Printf("Executing workflow %q...\n", workflowName)
-	if err := orch.Execute(run); err != nil {
-		// Re-fetch run to get updated status
-		run, _ = orch.GetRun(run.ID)
-		if run != nil {
-			fmt.Printf("Run completed with status: %s\n", run.Status)
-			if run.Error != "" {
-				fmt.Printf("Error: %s\n", run.Error)
-			}
-		}
-		return fmt.Errorf("execution failed: %w", err)
-	}
-
-	// Re-fetch run to get updated status
-	run, _ = orch.GetRun(run.ID)
-	if run != nil {
-		fmt.Printf("Run completed with status: %s\n", run.Status)
-	}
-	return nil
 }
 
 func newResumeCommand() *cobra.Command {
@@ -188,47 +194,35 @@ func newResumeCommand() *cobra.Command {
 				return fmt.Errorf("invalid run ID: %w", err)
 			}
 
-			cfg, err := config.New()
-			if err != nil {
-				return err
-			}
-
-			if err := cfg.EnsureDataDir(); err != nil {
-				return err
-			}
-
-			store, err := storage.New(cfg.DBPath)
+			cfg, store, err := openStore()
 			if err != nil {
 				return err
 			}
 			defer store.Close()
 
-			orch := orchestrator.New(store, cfg.WorkspacesDir())
+			pm := process.NewCLIManager()
+			proc := commands.NewProcessor(store, pm, cfg.WorkspacesDir())
 
-			run, err := orch.GetRun(runID)
+			resumeCmd, err := commands.NewCommand(runID, commands.CmdResumeRun, commands.ResumeRunPayload{})
 			if err != nil {
-				return fmt.Errorf("failed to get run: %w", err)
+				return err
+			}
+
+			if err := proc.SubmitCommand(resumeCmd); err != nil {
+				return err
 			}
 
 			fmt.Printf("Resuming run #%d\n", runID)
-			fmt.Printf("Workflow: %s\n", run.WorkflowPath)
 
-			if err := orch.Resume(runID); err != nil {
-				// Re-fetch run to get updated status
-				run, _ = orch.GetRun(runID)
-				if run != nil {
-					fmt.Printf("Run completed with status: %s\n", run.Status)
-					if run.Error != "" {
-						fmt.Printf("Error: %s\n", run.Error)
-					}
+			done := proc.ProcessRunSync(runID)
+			<-done
+
+			state, _ := store.ProjectRunFromDB(runID)
+			if state != nil {
+				fmt.Printf("Run completed with status: %s\n", state.Status)
+				if state.Error != "" {
+					fmt.Printf("Error: %s\n", state.Error)
 				}
-				return fmt.Errorf("resume failed: %w", err)
-			}
-
-			// Re-fetch run to get updated status
-			run, _ = orch.GetRun(runID)
-			if run != nil {
-				fmt.Printf("Run completed with status: %s\n", run.Status)
 			}
 			return nil
 		},
@@ -246,71 +240,47 @@ func newStatusCommand() *cobra.Command {
 				return fmt.Errorf("invalid run ID: %w", err)
 			}
 
-			cfg, err := config.New()
-			if err != nil {
-				return err
-			}
-
-			if err := cfg.EnsureDataDir(); err != nil {
-				return err
-			}
-
-			store, err := storage.New(cfg.DBPath)
+			_, store, err := openStore()
 			if err != nil {
 				return err
 			}
 			defer store.Close()
 
-			run, err := store.GetRun(runID)
+			state, err := store.ProjectRunFromDB(runID)
 			if err != nil {
 				return fmt.Errorf("failed to get run: %w", err)
 			}
 
-			fmt.Printf("Run #%d: %s\n", run.ID, run.WorkflowName)
-			fmt.Printf("Status: %s\n", run.Status)
-			fmt.Printf("Prompt: %s\n", run.InitialPrompt)
-			fmt.Printf("Workspace: %s\n", run.WorkspacePath)
-			if run.WorkflowPath != "" {
-				fmt.Printf("Workflow: %s\n", run.WorkflowPath)
+			fmt.Printf("Run #%d: %s\n", state.ID, state.WorkflowName)
+			fmt.Printf("Status: %s\n", state.Status)
+			fmt.Printf("Prompt: %s\n", state.InitialPrompt)
+			fmt.Printf("Workspace: %s\n", state.WorkspacePath)
+			if state.WorkflowPath != "" {
+				fmt.Printf("Workflow: %s\n", state.WorkflowPath)
 			}
-			if run.CurrentAgent != "" {
-				fmt.Printf("Agent: %s\n", run.CurrentAgent)
+			if state.CurrentAgent != "" {
+				fmt.Printf("Agent: %s\n", state.CurrentAgent)
 			}
 
-			// Show waiting information for waiting_human status
-			if run.Status == models.RunStatusWaitingHuman {
-				if run.WaitingSessionID != "" {
-					fmt.Printf("Session: %s\n", run.WaitingSessionID)
+			if state.Status == events.RunStatusWaitingHuman {
+				if state.WaitingSessionID != "" {
+					fmt.Printf("Session: %s\n", state.WaitingSessionID)
 				}
-				if run.WaitingReason != "" {
-					fmt.Printf("Reason: %s\n", run.WaitingReason)
+				if state.WaitingReason != "" {
+					fmt.Printf("Reason: %s\n", state.WaitingReason)
 				}
-				fmt.Printf("Waiting since: %s\n", formatTimeAgo(run.CreatedAt))
-				fmt.Printf("\nUse 'shop continue %d' to open the Claude session.\n", run.ID)
+				fmt.Printf("\nUse 'shop continue %d' to open the Claude session.\n", state.ID)
 			}
 
-			if run.Error != "" {
-				fmt.Printf("Error: %s\n", run.Error)
+			if state.Error != "" {
+				fmt.Printf("Error: %s\n", state.Error)
 			}
 
-			execs, err := store.GetExecutionsForRun(runID)
-			if err != nil {
-				return err
-			}
-
-			if len(execs) > 0 {
+			if len(state.Executions) > 0 {
 				fmt.Println("\nExecutions:")
-				for _, exec := range execs {
+				for i, exec := range state.Executions {
 					status := string(exec.Status)
-					if exec.ExitCode != nil {
-						status += fmt.Sprintf(" (exit %d)", *exec.ExitCode)
-					}
-					// Show call_index for Lua workflows
-					if exec.CallIndex > 0 {
-						fmt.Printf("  [%d] %s [%s]\n", exec.CallIndex, exec.AgentName, status)
-					} else {
-						fmt.Printf("  %d. %s [%s]\n", exec.SequenceNum, exec.AgentName, status)
-					}
+					fmt.Printf("  [%d] %s [%s]\n", i+1, exec.AgentName, status)
 				}
 			}
 
@@ -324,16 +294,7 @@ func newListCommand() *cobra.Command {
 		Use:   "list",
 		Short: "List recent runs",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			cfg, err := config.New()
-			if err != nil {
-				return err
-			}
-
-			if err := cfg.EnsureDataDir(); err != nil {
-				return err
-			}
-
-			store, err := storage.New(cfg.DBPath)
+			_, store, err := openStore()
 			if err != nil {
 				return err
 			}
@@ -341,7 +302,7 @@ func newListCommand() *cobra.Command {
 
 			active, _ := cmd.Flags().GetBool("active")
 
-			runs, err := store.ListRuns(20)
+			runs, err := store.ListRunIDs(20)
 			if err != nil {
 				return err
 			}
@@ -351,41 +312,59 @@ func newListCommand() *cobra.Command {
 				return nil
 			}
 
-			// Filter to active runs if requested
-			if active {
-				var activeRuns []*models.Run
-				for _, run := range runs {
-					if run.Status == models.RunStatusRunning ||
-						run.Status == models.RunStatusWaitingHuman ||
-						run.Status == models.RunStatusPending {
-						activeRuns = append(activeRuns, run)
+			// Project each run
+			type runEntry struct {
+				state *events.RunState
+			}
+			var entries []runEntry
+
+			for _, r := range runs {
+				evts, err := store.GetEvents(r.ID)
+				if err != nil {
+					continue
+				}
+				state := events.ProjectRun(r.ID, r.CreatedAt, evts)
+
+				if active {
+					if state.Status != events.RunStatusRunning &&
+						state.Status != events.RunStatusWaitingHuman &&
+						state.Status != events.RunStatusPending {
+						continue
 					}
 				}
-				runs = activeRuns
+				// Skip deleted runs
+				if state.Status == events.RunStatusDeleted {
+					continue
+				}
+
+				entries = append(entries, runEntry{state: state})
 			}
 
-			if len(runs) == 0 {
-				fmt.Println("No active runs found.")
+			if len(entries) == 0 {
+				if active {
+					fmt.Println("No active runs found.")
+				} else {
+					fmt.Println("No runs found.")
+				}
 				return nil
 			}
 
-			// Print header
 			fmt.Printf("%-4s %-15s %-14s %-12s %s\n", "ID", "WORKFLOW", "STATUS", "AGENT", "WAITING FOR")
 
-			for _, run := range runs {
-				status := string(run.Status)
-				agent := run.CurrentAgent
+			for _, e := range entries {
+				s := e.state
+				agent := s.CurrentAgent
 				if agent == "" {
 					agent = "-"
 				}
 
 				waitingFor := "-"
-				if run.Status == models.RunStatusWaitingHuman && run.WaitingReason != "" {
-					waitingFor = truncate(run.WaitingReason, 40)
+				if s.Status == events.RunStatusWaitingHuman && s.WaitingReason != "" {
+					waitingFor = truncate(s.WaitingReason, 40)
 				}
 
 				fmt.Printf("%-4d %-15s %-14s %-12s %s\n",
-					run.ID, truncate(run.WorkflowName, 15), status, truncate(agent, 12), waitingFor)
+					s.ID, truncate(s.WorkflowName, 15), string(s.Status), truncate(agent, 12), waitingFor)
 			}
 
 			return nil
@@ -407,26 +386,26 @@ func newKillCommand() *cobra.Command {
 				return fmt.Errorf("invalid run ID: %w", err)
 			}
 
-			cfg, err := config.New()
-			if err != nil {
-				return err
-			}
-
-			if err := cfg.EnsureDataDir(); err != nil {
-				return err
-			}
-
-			store, err := storage.New(cfg.DBPath)
+			cfg, store, err := openStore()
 			if err != nil {
 				return err
 			}
 			defer store.Close()
 
-			orch := orchestrator.New(store, cfg.WorkspacesDir())
+			pm := process.NewCLIManager()
+			proc := commands.NewProcessor(store, pm, cfg.WorkspacesDir())
 
-			if err := orch.KillRun(runID); err != nil {
-				return fmt.Errorf("failed to kill run: %w", err)
+			killCmd, err := commands.NewCommand(runID, commands.CmdKillRun, commands.KillRunPayload{})
+			if err != nil {
+				return err
 			}
+
+			if err := proc.SubmitCommand(killCmd); err != nil {
+				return err
+			}
+
+			done := proc.ProcessRunSync(runID)
+			<-done
 
 			fmt.Printf("Killed run #%d\n", runID)
 			return nil
@@ -445,42 +424,31 @@ func newDeleteCommand() *cobra.Command {
 				return fmt.Errorf("invalid run ID: %w", err)
 			}
 
-			cfg, err := config.New()
-			if err != nil {
-				return err
-			}
-
-			if err := cfg.EnsureDataDir(); err != nil {
-				return err
-			}
-
-			store, err := storage.New(cfg.DBPath)
+			cfg, store, err := openStore()
 			if err != nil {
 				return err
 			}
 			defer store.Close()
 
-			orch := orchestrator.New(store, cfg.WorkspacesDir())
+			pm := process.NewCLIManager()
+			proc := commands.NewProcessor(store, pm, cfg.WorkspacesDir())
 
-			if err := orch.DeleteRun(runID); err != nil {
-				return fmt.Errorf("failed to delete run: %w", err)
+			delCmd, err := commands.NewCommand(runID, commands.CmdDeleteRun, commands.DeleteRunPayload{})
+			if err != nil {
+				return err
 			}
+
+			if err := proc.SubmitCommand(delCmd); err != nil {
+				return err
+			}
+
+			done := proc.ProcessRunSync(runID)
+			<-done
 
 			fmt.Printf("Deleted run #%d\n", runID)
 			return nil
 		},
 	}
-}
-
-func truncate(s string, maxLen int) string {
-	if len(s) <= maxLen {
-		return s
-	}
-	return s[:maxLen-3] + "..."
-}
-
-func formatTimeAgo(t time.Time) string {
-	return storage.FormatTimeAgo(t)
 }
 
 func newContinueCommand() *cobra.Command {
@@ -495,39 +463,31 @@ func newContinueCommand() *cobra.Command {
 				return fmt.Errorf("invalid run ID: %w", err)
 			}
 
-			cfg, err := config.New()
-			if err != nil {
-				return err
-			}
-
-			if err := cfg.EnsureDataDir(); err != nil {
-				return err
-			}
-
-			store, err := storage.New(cfg.DBPath)
+			_, store, err := openStore()
 			if err != nil {
 				return err
 			}
 			defer store.Close()
 
-			orch := orchestrator.New(store, cfg.WorkspacesDir())
-
-			// Get run details to show context
-			run, err := orch.GetRun(runID)
+			state, err := store.ProjectRunFromDB(runID)
 			if err != nil {
 				return fmt.Errorf("failed to get run: %w", err)
 			}
 
-			sessionID, workDir, err := orch.ContinueRun(runID)
-			if err != nil {
-				return err
+			if state.Status != events.RunStatusWaitingHuman {
+				return fmt.Errorf("run %d is not waiting for human input (status: %s)", runID, state.Status)
 			}
 
-			fmt.Printf("Opening Claude session for: %s\n", run.CurrentAgent)
-			fmt.Printf("Reason: %s\n\n", run.WaitingReason)
+			if state.WaitingSessionID == "" {
+				return fmt.Errorf("run %d has no session ID to resume", runID)
+			}
 
-			// Resume the Claude session
-			claudeCmd := exec.Command("claude", "--resume", sessionID)
+			workDir := filepath.Join(state.WorkspacePath, "repo")
+
+			fmt.Printf("Opening Claude session for: %s\n", state.CurrentAgent)
+			fmt.Printf("Reason: %s\n\n", state.WaitingReason)
+
+			claudeCmd := exec.Command("claude", "--resume", state.WaitingSessionID)
 			claudeCmd.Dir = workDir
 			claudeCmd.Stdin = os.Stdin
 			claudeCmd.Stdout = os.Stdout
@@ -559,26 +519,26 @@ func newStopCommand() *cobra.Command {
 
 			reason, _ := cmd.Flags().GetString("reason")
 
-			cfg, err := config.New()
-			if err != nil {
-				return err
-			}
-
-			if err := cfg.EnsureDataDir(); err != nil {
-				return err
-			}
-
-			store, err := storage.New(cfg.DBPath)
+			cfg, store, err := openStore()
 			if err != nil {
 				return err
 			}
 			defer store.Close()
 
-			orch := orchestrator.New(store, cfg.WorkspacesDir())
+			pm := process.NewCLIManager()
+			proc := commands.NewProcessor(store, pm, cfg.WorkspacesDir())
 
-			if err := orch.StopRun(runID, reason); err != nil {
-				return fmt.Errorf("failed to stop run: %w", err)
+			stopCmd, err := commands.NewCommand(runID, commands.CmdStopRun, commands.StopRunPayload{Reason: reason})
+			if err != nil {
+				return err
 			}
+
+			if err := proc.SubmitCommand(stopCmd); err != nil {
+				return err
+			}
+
+			done := proc.ProcessRunSync(runID)
+			<-done
 
 			if reason != "" {
 				fmt.Printf("Run %d marked as stuck: %s\n", runID, reason)
@@ -599,26 +559,55 @@ func newMCPServerCommand() *cobra.Command {
 		Short:  "Run the Shop MCP server (used internally)",
 		Hidden: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			agent, _ := cmd.Flags().GetString("agent")
 			dbPath, _ := cmd.Flags().GetString("db")
 			runID, _ := cmd.Flags().GetInt64("run-id")
-			execID, _ := cmd.Flags().GetInt64("execution-id")
+			callIndex, _ := cmd.Flags().GetInt("call-index")
 
-			if agent == "" {
-				return fmt.Errorf("--agent is required")
+			// Legacy flag migration
+			if callIndex == 0 {
+				if execID, _ := cmd.Flags().GetInt64("execution-id"); execID > 0 {
+					callIndex = int(execID) // best-effort fallback
+				}
 			}
 
-			server := mcp.NewServer(agent, dbPath, runID, execID)
+			server := mcp.NewServer(dbPath, runID, callIndex)
 			return server.Run()
 		},
 	}
 
-	cmd.Flags().String("agent", "", "Agent name")
 	cmd.Flags().String("db", "", "Path to shop SQLite database")
 	cmd.Flags().Int64("run-id", 0, "Run ID")
-	cmd.Flags().Int64("execution-id", 0, "Execution ID")
-	// Legacy flag — accepted but ignored (sessions created before migration may pass it)
+	cmd.Flags().Int("call-index", 0, "Call index for this agent execution")
+	// Legacy flags
+	cmd.Flags().String("agent", "", "Agent name (legacy, ignored)")
+	cmd.Flags().MarkHidden("agent")
+	cmd.Flags().Int64("execution-id", 0, "Execution ID (legacy, maps to call-index)")
+	cmd.Flags().MarkHidden("execution-id")
 	cmd.Flags().String("signal-dir", "", "")
 	cmd.Flags().MarkHidden("signal-dir")
 	return cmd
+}
+
+// helpers
+
+func openStore() (*config.Config, *events.Store, error) {
+	cfg, err := config.New()
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := cfg.EnsureDataDir(); err != nil {
+		return nil, nil, err
+	}
+	store, err := events.NewStore(cfg.DBPath)
+	if err != nil {
+		return nil, nil, err
+	}
+	return cfg, store, nil
+}
+
+func truncate(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen-3] + "..."
 }

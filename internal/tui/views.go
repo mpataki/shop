@@ -6,7 +6,7 @@ import (
 	"time"
 
 	"github.com/charmbracelet/lipgloss"
-	"github.com/mpataki/shop/internal/models"
+	"github.com/mpataki/shop/internal/events"
 )
 
 func (a *App) View() string {
@@ -57,7 +57,7 @@ func (a *App) viewRunList() string {
 	return b.String()
 }
 
-func (a *App) renderRunRow(i int, run *models.Run) string {
+func (a *App) renderRunRow(i int, run *events.RunState) string {
 	selected := i == a.selectedIdx
 
 	id := fmt.Sprintf("#%-3d", run.ID)
@@ -65,9 +65,9 @@ func (a *App) renderRunRow(i int, run *models.Run) string {
 	status := a.formatStatus(run)
 	age := fmt.Sprintf("%-4s", a.formatAge(run.CreatedAt))
 
-	isInactive := run.Status == models.RunStatusComplete ||
-		run.Status == models.RunStatusFailed ||
-		run.Status == models.RunStatusPending
+	isInactive := run.Status == events.RunStatusComplete ||
+		run.Status == events.RunStatusFailed ||
+		run.Status == events.RunStatusPending
 
 	if selected {
 		return cursorStyle.Render("❯ ") +
@@ -106,11 +106,11 @@ func (a *App) viewRunDetail() string {
 	infoContent.WriteString(run.InitialPrompt + "\n\n")
 	infoContent.WriteString(labelStyle.Render("workspace  ") + dimStyle.Render(run.WorkspacePath))
 
-	if run.Status == models.RunStatusWaitingHuman && run.WaitingReason != "" {
+	if run.Status == events.RunStatusWaitingHuman && run.WaitingReason != "" {
 		infoContent.WriteString("\n\n" + statusWaitingStyle.Render("⏸ "+run.WaitingReason))
 	}
 
-	if run.Status == models.RunStatusFailed && run.Error != "" {
+	if run.Status == events.RunStatusFailed && run.Error != "" {
 		infoContent.WriteString("\n\n" + errorStyle.Render("✗ "+run.Error))
 	}
 
@@ -119,10 +119,10 @@ func (a *App) viewRunDetail() string {
 
 	// Executions section
 	var execContent strings.Builder
-	if len(a.executions) == 0 {
+	if len(run.Executions) == 0 {
 		execContent.WriteString(dimStyle.Render("(none yet)"))
 	} else {
-		for i, exec := range a.executions {
+		for i, exec := range run.Executions {
 			if i > 0 {
 				execContent.WriteString("\n")
 			}
@@ -138,7 +138,7 @@ func (a *App) viewRunDetail() string {
 	b.WriteString(a.renderLogPanel())
 
 	// Help
-	if run.Status == models.RunStatusWaitingHuman {
+	if run.Status == events.RunStatusWaitingHuman {
 		b.WriteString(helpStyle.Render("  j/k ↕  c continue  s stop  o output  h/← back  q quit"))
 	} else {
 		b.WriteString(helpStyle.Render("  j/k ↕  l/↵ resume session  o output  h/← back  q quit"))
@@ -147,10 +147,10 @@ func (a *App) viewRunDetail() string {
 	return b.String()
 }
 
-func (a *App) renderExecRow(i int, exec *models.Execution) string {
+func (a *App) renderExecRow(i int, exec events.ExecutionState) string {
 	selected := i == a.selectedExecIdx
 
-	num := fmt.Sprintf("%d.", exec.SequenceNum)
+	num := fmt.Sprintf("%d.", i+1)
 	agent := padRight(exec.AgentName, 12)
 	status := a.formatExecStatus(exec)
 	duration := a.formatExecDuration(exec)
@@ -172,58 +172,50 @@ func (a *App) renderExecRow(i int, exec *models.Execution) string {
 	return "  " + num + "  " + agent + "  " + status + "  " + padRight(duration, 8) + "  " + signal + "  " + model
 }
 
-func (a *App) formatExecStatus(exec *models.Execution) string {
+func (a *App) formatExecStatus(exec events.ExecutionState) string {
 	switch exec.Status {
-	case models.ExecStatusComplete:
-		exitStr := ""
-		if exec.ExitCode != nil && *exec.ExitCode != 0 {
-			exitStr = statusFailedStyle.Render(fmt.Sprintf(" exit:%d", *exec.ExitCode))
-		}
-		return statusCompleteStyle.Render("✓") + exitStr
-	case models.ExecStatusRunning:
+	case events.ExecStatusCompleted:
+		return statusCompleteStyle.Render("✓")
+	case events.ExecStatusStarted:
 		return statusRunningStyle.Render(a.spinner.View())
-	case models.ExecStatusFailed:
-		exitStr := ""
-		if exec.ExitCode != nil {
-			exitStr = statusFailedStyle.Render(fmt.Sprintf(" exit:%d", *exec.ExitCode))
-		}
-		return statusFailedStyle.Render("✗") + exitStr
-	case models.ExecStatusWaitingHuman:
+	case events.ExecStatusFailed:
+		return statusFailedStyle.Render("✗")
+	case events.ExecStatusWaitingHuman:
 		return statusWaitingStyle.Render("⏸")
 	default:
 		return dimStyle.Render("○")
 	}
 }
 
-func (a *App) formatExecDuration(exec *models.Execution) string {
-	if exec.StartedAt != nil && exec.CompletedAt != nil {
-		return dimStyle.Render(formatDuration(exec.CompletedAt.Sub(*exec.StartedAt)))
+func (a *App) formatExecDuration(exec events.ExecutionState) string {
+	if exec.CompletedAt != nil {
+		return dimStyle.Render(formatDuration(exec.CompletedAt.Sub(exec.StartedAt)))
 	}
-	if exec.StartedAt != nil && exec.Status == models.ExecStatusRunning {
-		return statusRunningStyle.Render(formatDuration(time.Since(*exec.StartedAt)))
+	if exec.Status == events.ExecStatusStarted {
+		return statusRunningStyle.Render(formatDuration(time.Since(exec.StartedAt)))
 	}
 	return ""
 }
 
-func (a *App) formatSignalStatus(exec *models.Execution) string {
-	if exec.OutputSignal == nil {
+func (a *App) formatSignalStatus(exec events.ExecutionState) string {
+	if exec.Signal == nil {
 		return ""
 	}
-	sig, ok := exec.OutputSignal["status"].(string)
+	sig, ok := exec.Signal["status"].(string)
 	if !ok {
 		return ""
 	}
-	switch models.SignalStatus(sig) {
-	case models.SignalApproved, models.SignalDone, models.SignalContinue:
+	switch events.SignalStatus(sig) {
+	case events.SignalApproved, events.SignalDone, events.SignalContinue:
 		return signalApprovedStyle.Render(sig)
-	case models.SignalChangesRequested:
+	case events.SignalChangesRequested:
 		return signalChangesStyle.Render(sig)
-	case models.SignalBlocked, models.SignalStop:
+	case events.SignalBlocked, events.SignalStop:
 		return signalBlockedStyle.Render(sig)
-	case models.SignalNeedsHuman:
+	case events.SignalNeedsHuman:
 		return signalNeedsHumanStyle.Render(sig)
-	case models.SignalError:
-		reason, _ := exec.OutputSignal["reason"].(string)
+	case events.SignalError:
+		reason, _ := exec.Signal["reason"].(string)
 		if reason != "" {
 			return statusFailedStyle.Render(reason)
 		}
@@ -233,23 +225,25 @@ func (a *App) formatSignalStatus(exec *models.Execution) string {
 	}
 }
 
-func (a *App) formatStatus(run *models.Run) string {
+func (a *App) formatStatus(run *events.RunState) string {
 	switch run.Status {
-	case models.RunStatusRunning:
+	case events.RunStatusRunning:
 		agent := run.CurrentAgent
 		if agent == "" {
 			agent = "running"
 		}
 		return statusRunningStyle.Render(a.spinner.View() + " " + agent)
-	case models.RunStatusComplete:
+	case events.RunStatusComplete:
 		return statusCompleteStyle.Render("✓ done")
-	case models.RunStatusFailed:
+	case events.RunStatusFailed:
 		return statusFailedStyle.Render("✗ failed")
-	case models.RunStatusStuck:
+	case events.RunStatusStuck:
 		return statusStuckStyle.Render("⚠ stuck")
-	case models.RunStatusWaitingHuman:
+	case events.RunStatusWaitingHuman:
 		return statusWaitingStyle.Render("⏸ waiting")
-	case models.RunStatusPending:
+	case events.RunStatusKilled:
+		return statusFailedStyle.Render("✗ killed")
+	case events.RunStatusPending:
 		return statusPendingStyle.Render("○ pending")
 	default:
 		return dimStyle.Render(string(run.Status))
@@ -385,9 +379,8 @@ func (a *App) contentWidth() int {
 	return w
 }
 
-// promptBoxInnerWidth returns the usable width inside the prompt box (minus border + padding).
 func (a *App) promptBoxInnerWidth() int {
-	return a.contentWidth() - 4 // 2 border + 2 padding
+	return a.contentWidth() - 4
 }
 
 func padRight(s string, n int) string {
