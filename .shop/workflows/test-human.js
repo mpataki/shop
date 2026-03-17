@@ -1,5 +1,5 @@
 // Test workflow for human interaction features
-// Tests both pause() and NEEDS_HUMAN signal handling
+// Tests both pause() and STUCK signal handling
 
 function workflow(prompt) {
   log("Starting human interaction test");

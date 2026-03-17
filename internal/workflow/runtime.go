@@ -56,7 +56,7 @@ func NewRuntime(deps RuntimeDeps) *Runtime {
 	}
 }
 
-// WaitingInfo holds details about a NEEDS_HUMAN suspension.
+// WaitingInfo holds details about a STUCK suspension.
 type WaitingInfo struct {
 	Reason    string
 	SessionID string
@@ -198,11 +198,10 @@ func (r *Runtime) jsRun(call goja.FunctionCall) goja.Value {
 				// Fall through to fresh run
 			} else {
 				signal := exec.Signal
-				if status, _ := signal["status"].(string); status == string(events.SignalNeedsHuman) {
+				if status, _ := signal["status"].(string); status == string(events.SignalStuck) {
 					r.setWaitingHuman(agent, idx, exec.SessionID, signal)
-					panic(r.vm.NewGoError(fmt.Errorf("waiting for human: %s", r.waitingReason)))
+					panic(r.vm.NewGoError(fmt.Errorf("stuck: %s", r.waitingReason)))
 				}
-				r.autoStuck(agent, signal)
 				return r.vm.ToValue(signal)
 			}
 		}
@@ -221,7 +220,6 @@ func (r *Runtime) jsRun(call goja.FunctionCall) goja.Value {
 		panic(r.vm.NewGoError(fmt.Errorf("failed to run agent: %v", err)))
 	}
 
-	r.autoStuck(agent, signal)
 	return r.vm.ToValue(signal)
 }
 
@@ -314,10 +312,10 @@ func (r *Runtime) runAgent(agent, prompt, model string, callIndex int, customSta
 	})
 	r.deps.EmitEvents([]events.Event{completedEvt})
 
-	// Handle NEEDS_HUMAN
-	if status, ok := signal["status"].(string); ok && status == string(events.SignalNeedsHuman) {
+	// Handle STUCK — suspend for human input
+	if status, ok := signal["status"].(string); ok && status == string(events.SignalStuck) {
 		r.setWaitingHuman(agent, callIndex, sessionID, signal)
-		return nil, fmt.Errorf("agent %s needs human input: %s", agent, r.waitingReason)
+		return nil, fmt.Errorf("agent %s is stuck: %s", agent, r.waitingReason)
 	}
 
 	return signal, nil
@@ -416,12 +414,12 @@ func (r *Runtime) runCheckpoint(message string, callIndex int) (map[string]any, 
 
 	if signal == nil {
 		signal = map[string]any{
-			"status": string(events.SignalNeedsHuman),
+			"status": string(events.SignalStuck),
 			"reason": message,
 		}
 	}
 
-	if status, _ := signal["status"].(string); status == string(events.SignalNeedsHuman) {
+	if status, _ := signal["status"].(string); status == string(events.SignalStuck) {
 		r.setWaitingHuman(agent, callIndex, sessionID, signal)
 		return nil, fmt.Errorf("checkpoint paused: %s", message)
 	}
@@ -489,21 +487,6 @@ func (r *Runtime) jsLog(call goja.FunctionCall) goja.Value {
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-// autoStuck checks if an agent returned STUCK and automatically marks the workflow as stuck.
-func (r *Runtime) autoStuck(agent string, signal map[string]any) {
-	status, _ := signal["status"].(string)
-	if status != string(events.SignalStuck) {
-		return
-	}
-	reason, _ := signal["reason"].(string)
-	if reason == "" {
-		reason = agent + " is blocked"
-	}
-	r.stuckReason = reason
-	r.isStuck = true
-	panic(r.vm.NewGoError(fmt.Errorf("stuck: %s", reason)))
-}
-
 func (r *Runtime) emitLog(message string) {
 	evt, _ := events.NewEvent(r.deps.State.ID, events.EventLogMessage, events.LogMessagePayload{Message: message})
 	r.deps.EmitEvents([]events.Event{evt})
@@ -517,7 +500,7 @@ func (r *Runtime) setWaitingHuman(agent string, callIndex int, sessionID string,
 	if reason, ok := signal["reason"].(string); ok {
 		r.waitingReason = reason
 	} else {
-		r.waitingReason = "Agent needs human input"
+		r.waitingReason = "Agent is stuck"
 	}
 }
 

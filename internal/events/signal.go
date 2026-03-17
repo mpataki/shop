@@ -5,14 +5,13 @@ type SignalStatus string
 
 // Reserved statuses have special runtime behavior and are always available.
 const (
-	SignalDone       SignalStatus = "DONE"
-	SignalStuck      SignalStatus = "STUCK"
-	SignalNeedsHuman SignalStatus = "NEEDS_HUMAN"
-	SignalError      SignalStatus = "ERROR" // internal only, never in agent-facing enum
+	SignalDone  SignalStatus = "DONE"
+	SignalStuck SignalStatus = "STUCK"
+	SignalError SignalStatus = "ERROR" // internal only, never in agent-facing enum
 )
 
 // ReservedStatuses are always included in the agent-facing status enum.
-var ReservedStatuses = []string{"DONE", "STUCK", "NEEDS_HUMAN"}
+var ReservedStatuses = []string{"DONE", "STUCK"}
 
 // MergeStatuses returns reserved statuses + custom, deduplicating and excluding ERROR.
 func MergeStatuses(custom []string) []string {

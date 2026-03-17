@@ -1,10 +1,10 @@
-// Test workflow for NEEDS_HUMAN signal
+// Test workflow for STUCK signal
 // Tests agent-initiated escalation
 
 function workflow(prompt) {
-  log("Starting NEEDS_HUMAN test");
+  log("Starting STUCK test");
 
-  // Run an agent that will return NEEDS_HUMAN
+  // Run an agent that will return STUCK
   log("Running needs-help agent...");
   const result = run("needs-help", { prompt, model: "sonnet" });
 

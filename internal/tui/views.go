@@ -210,8 +210,6 @@ func (a *App) formatSignalStatus(exec events.ExecutionState) string {
 		return signalApprovedStyle.Render(sig)
 	case events.SignalStuck:
 		return signalBlockedStyle.Render(sig)
-	case events.SignalNeedsHuman:
-		return signalNeedsHumanStyle.Render(sig)
 	case events.SignalError:
 		reason, _ := exec.Signal["reason"].(string)
 		if reason != "" {

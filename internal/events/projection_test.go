@@ -101,7 +101,7 @@ func TestProjectRunStuck(t *testing.T) {
 	}
 }
 
-func TestProjectRunNeedsHuman(t *testing.T) {
+func TestProjectRunAgentStuck(t *testing.T) {
 	now := time.Now()
 	events := []Event{
 		withVersion(MustNewEvent(1, EventRunStarted, RunStartedPayload{WorkflowName: "test"}), 1, now),
@@ -110,7 +110,7 @@ func TestProjectRunNeedsHuman(t *testing.T) {
 		}), 2, now),
 		withVersion(MustNewEvent(1, EventAgentCompleted, AgentCompletedPayload{
 			AgentName: "coder", CallIndex: 1,
-			Signal: map[string]any{"status": "NEEDS_HUMAN", "reason": "help me"},
+			Signal: map[string]any{"status": "STUCK", "reason": "help me"},
 		}), 3, now),
 		withVersion(MustNewEvent(1, EventRunWaitingHuman, RunWaitingHumanPayload{
 			Reason: "help me", CallIndex: 1, SessionID: "s1",
@@ -138,7 +138,7 @@ func TestProjectRunNeedsHuman(t *testing.T) {
 	}
 }
 
-func TestProjectRunNeedsHumanThenResume(t *testing.T) {
+func TestProjectRunAgentStuckThenResume(t *testing.T) {
 	now := time.Now()
 	events := []Event{
 		withVersion(MustNewEvent(1, EventRunStarted, RunStartedPayload{WorkflowName: "test"}), 1, now),
@@ -147,7 +147,7 @@ func TestProjectRunNeedsHumanThenResume(t *testing.T) {
 		}), 2, now),
 		withVersion(MustNewEvent(1, EventAgentCompleted, AgentCompletedPayload{
 			AgentName: "coder", CallIndex: 1,
-			Signal: map[string]any{"status": "NEEDS_HUMAN", "reason": "help"},
+			Signal: map[string]any{"status": "STUCK", "reason": "help"},
 		}), 3, now),
 		withVersion(MustNewEvent(1, EventRunWaitingHuman, RunWaitingHumanPayload{
 			Reason: "help", CallIndex: 1, SessionID: "s1",

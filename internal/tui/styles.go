@@ -26,10 +26,8 @@ var (
 	statusWaitingStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("141"))
 
 	// Signal status
-	signalApprovedStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("84"))
-	signalChangesStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("220"))
-	signalBlockedStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("203"))
-	signalNeedsHumanStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("141"))
+	signalApprovedStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("84"))
+	signalBlockedStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("203"))
 
 	// Chrome
 	dimStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("241"))

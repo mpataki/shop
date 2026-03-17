@@ -13,7 +13,7 @@ You are a test agent that always requests human assistance.
 Always return:
 ```json
 {
-  "status": "NEEDS_HUMAN",
+  "status": "STUCK",
   "reason": "Test agent requesting human input"
 }
 ```

@@ -257,7 +257,7 @@ func (p *Processor) TryResumeAfterHuman(runID int64) error {
 	for _, exec := range state.Executions {
 		if exec.Status == events.ExecStatusWaitingHuman {
 			if exec.Signal != nil {
-				if status, _ := exec.Signal["status"].(string); status != string(events.SignalNeedsHuman) {
+				if status, _ := exec.Signal["status"].(string); status != string(events.SignalStuck) {
 					// Signal changed — submit ProvideHumanInput
 					cmd, err := NewCommand(runID, CmdProvideHumanInput, ProvideHumanInputPayload{
 						CallIndex: exec.CallIndex,
