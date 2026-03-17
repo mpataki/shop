@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 
 	"github.com/dop251/goja"
 
@@ -27,7 +26,7 @@ type RuntimeDeps struct {
 	// Callbacks
 	EmitEvents     func(evts []events.Event) ([]events.Event, error)
 	DrainCommands  func() error
-	WriteMCPConfig func(callIndex int) error
+	WriteMCPConfig func(callIndex int, statuses []string) error
 }
 
 // Runtime executes JavaScript workflow scripts in a sandboxed environment.
@@ -159,6 +158,7 @@ func (r *Runtime) jsRun(call goja.FunctionCall) goja.Value {
 	agent := arg0.String()
 
 	var prompt, model string
+	var customStatuses []string
 	arg1 := call.Argument(1)
 	if !goja.IsUndefined(arg1) && !goja.IsNull(arg1) {
 		switch v := arg1.Export().(type) {
@@ -170,6 +170,13 @@ func (r *Runtime) jsRun(call goja.FunctionCall) goja.Value {
 			}
 			if m, ok := v["model"].(string); ok {
 				model = m
+			}
+			if s, ok := v["statuses"].([]any); ok {
+				for _, item := range s {
+					if str, ok := item.(string); ok {
+						customStatuses = append(customStatuses, str)
+					}
+				}
 			}
 		default:
 			panic(r.vm.NewTypeError("run() second argument must be a string or object"))
@@ -206,7 +213,7 @@ func (r *Runtime) jsRun(call goja.FunctionCall) goja.Value {
 	}
 
 	// ── 2. Run fresh ──
-	signal, err := r.runAgent(agent, prompt, model, idx)
+	signal, err := r.runAgent(agent, prompt, model, idx, customStatuses)
 	if err != nil {
 		if r.waitingHuman {
 			panic(r.vm.NewGoError(fmt.Errorf("waiting for human: %s", r.waitingReason)))
@@ -218,13 +225,13 @@ func (r *Runtime) jsRun(call goja.FunctionCall) goja.Value {
 	return r.vm.ToValue(signal)
 }
 
-func (r *Runtime) runAgent(agent, prompt, model string, callIndex int) (map[string]any, error) {
+func (r *Runtime) runAgent(agent, prompt, model string, callIndex int, customStatuses []string) (map[string]any, error) {
 	// Create scratchpad
 	scratchDir := filepath.Join(r.deps.WorkspacePath, "scratchpad", agent)
 	os.MkdirAll(scratchDir, 0755)
 
 	// Write MCP config
-	if err := r.deps.WriteMCPConfig(callIndex); err != nil {
+	if err := r.deps.WriteMCPConfig(callIndex, customStatuses); err != nil {
 		return nil, fmt.Errorf("write MCP config: %w", err)
 	}
 
@@ -358,8 +365,8 @@ func (r *Runtime) runCheckpoint(message string, callIndex int) (map[string]any, 
 	scratchDir := filepath.Join(r.deps.WorkspacePath, "scratchpad", agent)
 	os.MkdirAll(scratchDir, 0755)
 
-	// Write MCP config
-	if err := r.deps.WriteMCPConfig(callIndex); err != nil {
+	// Write MCP config with checkpoint-specific statuses
+	if err := r.deps.WriteMCPConfig(callIndex, []string{"CONTINUE", "STOP"}); err != nil {
 		return nil, fmt.Errorf("write MCP config: %w", err)
 	}
 
@@ -431,7 +438,7 @@ func (r *Runtime) runCheckpoint(message string, callIndex int) (map[string]any, 
 func (r *Runtime) pauseResult(signal map[string]any) goja.Value {
 	status, _ := signal["status"].(string)
 	result := map[string]any{
-		"continue": status == string(events.SignalContinue),
+		"continue": status == "CONTINUE",
 	}
 	if reason, ok := signal["reason"].(string); ok && reason != "" {
 		result["reason"] = reason
@@ -531,7 +538,6 @@ func (r *Runtime) buildAgentPrompt(agent, prompt string) string {
 
 	result += "\n\n---\n"
 	result += "IMPORTANT: When you have completed your task, you MUST call the `report_signal` tool to report your status.\n"
-	result += "Valid statuses: " + strings.Join(events.ValidAgentStatusStrings(), ", ") + "\n"
 
 	return result
 }
@@ -547,11 +553,11 @@ func (r *Runtime) buildCheckpointPrompt(message string) string {
 3. Decide whether to continue or stop
 
 When ready, call the report_signal tool with your decision:
-- To continue: report_signal(status="%s", summary="your note")
-- To stop: report_signal(status="%s", summary="reason for stopping")
+- To continue: report_signal(status="CONTINUE", summary="your note")
+- To stop: report_signal(status="STOP", summary="reason for stopping")
 
 Wait for the human to provide guidance before reporting your decision.`,
-		message, events.SignalContinue, events.SignalStop)
+		message)
 }
 
 // IsWorkflow checks if a file is a JavaScript workflow.

@@ -569,7 +569,12 @@ func newMCPServerCommand() *cobra.Command {
 				}
 			}
 
-			server := mcp.NewServer(dbPath, runID, callIndex)
+			var customStatuses []string
+			if statusesStr, _ := cmd.Flags().GetString("statuses"); statusesStr != "" {
+				customStatuses = strings.Split(statusesStr, ",")
+			}
+
+			server := mcp.NewServer(dbPath, runID, callIndex, customStatuses)
 			return server.Run()
 		},
 	}
@@ -577,6 +582,7 @@ func newMCPServerCommand() *cobra.Command {
 	cmd.Flags().String("db", "", "Path to shop SQLite database")
 	cmd.Flags().Int64("run-id", 0, "Run ID")
 	cmd.Flags().Int("call-index", 0, "Call index for this agent execution")
+	cmd.Flags().String("statuses", "", "Comma-separated custom statuses for this agent call")
 	// Legacy flags
 	cmd.Flags().String("agent", "", "Agent name (legacy, ignored)")
 	cmd.Flags().MarkHidden("agent")

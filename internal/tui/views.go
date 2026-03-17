@@ -206,11 +206,9 @@ func (a *App) formatSignalStatus(exec events.ExecutionState) string {
 		return ""
 	}
 	switch events.SignalStatus(sig) {
-	case events.SignalApproved, events.SignalDone, events.SignalContinue:
+	case events.SignalDone:
 		return signalApprovedStyle.Render(sig)
-	case events.SignalChangesRequested:
-		return signalChangesStyle.Render(sig)
-	case events.SignalStuck, events.SignalStop:
+	case events.SignalStuck:
 		return signalBlockedStyle.Render(sig)
 	case events.SignalNeedsHuman:
 		return signalNeedsHumanStyle.Render(sig)

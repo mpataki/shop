@@ -14,7 +14,7 @@ function workflow(prompt) {
 
     run("coder", { model: "sonnet" });
 
-    const review = run("reviewer", { model: "sonnet" });
+    const review = run("reviewer", { model: "sonnet", statuses: ["APPROVED", "CHANGES_REQUESTED"] });
     if (review.status === "APPROVED") {
       log("Changes approved!");
       return;

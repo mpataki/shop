@@ -61,8 +61,8 @@ func (p *Processor) handleExecuteWorkflow(runID int64, cmd events.CommandRow) er
 		DrainCommands: func() error {
 			return p.drainPendingCommands(runID)
 		},
-		WriteMCPConfig: func(callIndex int) error {
-			return WriteMCPConfig(state.WorkspacePath, p.store.DBPath(), runID, callIndex)
+		WriteMCPConfig: func(callIndex int, statuses []string) error {
+			return WriteMCPConfig(state.WorkspacePath, p.store.DBPath(), runID, callIndex, statuses)
 		},
 	}
 
@@ -107,12 +107,6 @@ func (p *Processor) handleReportSignal(runID int64, cmd events.CommandRow) error
 	var payload ReportSignalPayload
 	if err := json.Unmarshal(cmd.Payload, &payload); err != nil {
 		return err
-	}
-
-	// Validate signal status
-	status := events.SignalStatus(payload.Status)
-	if !status.IsValid() {
-		return fmt.Errorf("invalid signal status: %s", payload.Status)
 	}
 
 	signal := payload.Signal

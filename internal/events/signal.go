@@ -3,43 +3,31 @@ package events
 // SignalStatus represents the completion status an agent reports via report_signal.
 type SignalStatus string
 
+// Reserved statuses have special runtime behavior and are always available.
 const (
-	SignalDone             SignalStatus = "DONE"
-	SignalStuck            SignalStatus = "STUCK"
-	SignalNeedsHuman       SignalStatus = "NEEDS_HUMAN"
-	SignalApproved         SignalStatus = "APPROVED"
-	SignalChangesRequested SignalStatus = "CHANGES_REQUESTED"
-	SignalContinue         SignalStatus = "CONTINUE"
-	SignalStop             SignalStatus = "STOP"
-	SignalError            SignalStatus = "ERROR" // internal only, not agent-facing
+	SignalDone       SignalStatus = "DONE"
+	SignalStuck      SignalStatus = "STUCK"
+	SignalNeedsHuman SignalStatus = "NEEDS_HUMAN"
+	SignalError      SignalStatus = "ERROR" // internal only, never in agent-facing enum
 )
 
-// ValidAgentStatuses are the statuses agents can report via the MCP tool.
-var ValidAgentStatuses = []SignalStatus{
-	SignalDone,
-	SignalStuck,
-	SignalNeedsHuman,
-	SignalApproved,
-	SignalChangesRequested,
-	SignalContinue,
-	SignalStop,
-}
+// ReservedStatuses are always included in the agent-facing status enum.
+var ReservedStatuses = []string{"DONE", "STUCK", "NEEDS_HUMAN"}
 
-// IsValid returns true if the status is in the set of valid agent-facing statuses.
-func (s SignalStatus) IsValid() bool {
-	for _, v := range ValidAgentStatuses {
-		if s == v {
-			return true
-		}
+// MergeStatuses returns reserved statuses + custom, deduplicating and excluding ERROR.
+func MergeStatuses(custom []string) []string {
+	seen := make(map[string]bool, len(ReservedStatuses)+len(custom))
+	out := make([]string, 0, len(ReservedStatuses)+len(custom))
+	for _, s := range ReservedStatuses {
+		seen[s] = true
+		out = append(out, s)
 	}
-	return false
-}
-
-// ValidAgentStatusStrings returns the valid statuses as strings (for JSON schema enums).
-func ValidAgentStatusStrings() []string {
-	out := make([]string, len(ValidAgentStatuses))
-	for i, s := range ValidAgentStatuses {
-		out[i] = string(s)
+	for _, s := range custom {
+		if s == string(SignalError) || seen[s] {
+			continue
+		}
+		seen[s] = true
+		out = append(out, s)
 	}
 	return out
 }

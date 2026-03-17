@@ -6,7 +6,7 @@ function workflow(prompt) {
 
   run("architect", { prompt, model: "sonnet" });
   run("coder", { model: "sonnet" });
-  run("reviewer", { model: "sonnet" });
+  run("reviewer", { model: "sonnet", statuses: ["APPROVED", "CHANGES_REQUESTED"] });
 
   log("Workflow complete");
 }

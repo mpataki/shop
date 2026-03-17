@@ -17,13 +17,15 @@ type Server struct {
 	dbPath    string
 	runID     int64
 	callIndex int
+	statuses  []string // merged reserved + custom statuses
 }
 
-func NewServer(dbPath string, runID int64, callIndex int) *Server {
+func NewServer(dbPath string, runID int64, callIndex int, customStatuses []string) *Server {
 	return &Server{
 		dbPath:    dbPath,
 		runID:     runID,
 		callIndex: callIndex,
+		statuses:  events.MergeStatuses(customStatuses),
 	}
 }
 
@@ -120,7 +122,7 @@ func (s *Server) handleToolsList() map[string]any {
 					"properties": map[string]any{
 						"status": map[string]any{
 							"type":        "string",
-							"enum":        events.ValidAgentStatusStrings(),
+							"enum":        s.statuses,
 							"description": "Your completion status",
 						},
 						"summary": map[string]any{
@@ -179,9 +181,8 @@ func (s *Server) handleToolsCall(params json.RawMessage, store *events.Store) ma
 
 func (s *Server) handleReportSignal(args map[string]any, store *events.Store) map[string]any {
 	statusStr, _ := args["status"].(string)
-	status := events.SignalStatus(statusStr)
-	if !status.IsValid() {
-		return toolError(fmt.Sprintf("invalid status %q, must be one of: %v", statusStr, events.ValidAgentStatusStrings()))
+	if !contains(s.statuses, statusStr) {
+		return toolError(fmt.Sprintf("invalid status %q, must be one of: %v", statusStr, s.statuses))
 	}
 
 	if store == nil {
@@ -206,7 +207,7 @@ func (s *Server) handleReportSignal(args map[string]any, store *events.Store) ma
 		"content": []map[string]any{
 			{
 				"type": "text",
-				"text": fmt.Sprintf("Signal reported: status=%s", status),
+				"text": fmt.Sprintf("Signal reported: status=%s", statusStr),
 			},
 		},
 	}
@@ -275,6 +276,15 @@ func (s *Server) handleGetRunInfo(store *events.Store) map[string]any {
 			},
 		},
 	}
+}
+
+func contains(ss []string, s string) bool {
+	for _, v := range ss {
+		if v == s {
+			return true
+		}
+	}
+	return false
 }
 
 func toolError(msg string) map[string]any {
