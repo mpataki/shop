@@ -210,7 +210,7 @@ func (a *App) formatSignalStatus(exec events.ExecutionState) string {
 		return signalApprovedStyle.Render(sig)
 	case events.SignalChangesRequested:
 		return signalChangesStyle.Render(sig)
-	case events.SignalBlocked, events.SignalStop:
+	case events.SignalStuck, events.SignalStop:
 		return signalBlockedStyle.Render(sig)
 	case events.SignalNeedsHuman:
 		return signalNeedsHumanStyle.Render(sig)

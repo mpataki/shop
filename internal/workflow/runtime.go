@@ -195,6 +195,7 @@ func (r *Runtime) jsRun(call goja.FunctionCall) goja.Value {
 					r.setWaitingHuman(agent, idx, exec.SessionID, signal)
 					panic(r.vm.NewGoError(fmt.Errorf("waiting for human: %s", r.waitingReason)))
 				}
+				r.autoStuck(agent, signal)
 				return r.vm.ToValue(signal)
 			}
 		}
@@ -213,6 +214,7 @@ func (r *Runtime) jsRun(call goja.FunctionCall) goja.Value {
 		panic(r.vm.NewGoError(fmt.Errorf("failed to run agent: %v", err)))
 	}
 
+	r.autoStuck(agent, signal)
 	return r.vm.ToValue(signal)
 }
 
@@ -479,6 +481,21 @@ func (r *Runtime) jsLog(call goja.FunctionCall) goja.Value {
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
+
+// autoStuck checks if an agent returned STUCK and automatically marks the workflow as stuck.
+func (r *Runtime) autoStuck(agent string, signal map[string]any) {
+	status, _ := signal["status"].(string)
+	if status != string(events.SignalStuck) {
+		return
+	}
+	reason, _ := signal["reason"].(string)
+	if reason == "" {
+		reason = agent + " is blocked"
+	}
+	r.stuckReason = reason
+	r.isStuck = true
+	panic(r.vm.NewGoError(fmt.Errorf("stuck: %s", reason)))
+}
 
 func (r *Runtime) emitLog(message string) {
 	evt, _ := events.NewEvent(r.deps.State.ID, events.EventLogMessage, events.LogMessagePayload{Message: message})

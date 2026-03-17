@@ -5,7 +5,7 @@ type SignalStatus string
 
 const (
 	SignalDone             SignalStatus = "DONE"
-	SignalBlocked          SignalStatus = "BLOCKED"
+	SignalStuck            SignalStatus = "STUCK"
 	SignalNeedsHuman       SignalStatus = "NEEDS_HUMAN"
 	SignalApproved         SignalStatus = "APPROVED"
 	SignalChangesRequested SignalStatus = "CHANGES_REQUESTED"
@@ -17,7 +17,7 @@ const (
 // ValidAgentStatuses are the statuses agents can report via the MCP tool.
 var ValidAgentStatuses = []SignalStatus{
 	SignalDone,
-	SignalBlocked,
+	SignalStuck,
 	SignalNeedsHuman,
 	SignalApproved,
 	SignalChangesRequested,

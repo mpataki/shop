@@ -129,7 +129,7 @@ func (s *Server) handleToolsList() map[string]any {
 						},
 						"reason": map[string]any{
 							"type":        "string",
-							"description": "Reason, if status is BLOCKED, NEEDS_HUMAN, or STOP",
+							"description": "Reason, if status is STUCK, NEEDS_HUMAN, or STOP",
 						},
 					},
 					"required": []string{"status", "summary"},
