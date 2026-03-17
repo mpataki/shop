@@ -15,7 +15,6 @@ import (
 	"github.com/mpataki/shop/internal/mcp"
 	"github.com/mpataki/shop/internal/process"
 	"github.com/mpataki/shop/internal/tui"
-	"github.com/mpataki/shop/internal/workflow"
 	"github.com/spf13/cobra"
 )
 
@@ -72,7 +71,7 @@ func runTUI(cmd *cobra.Command, args []string) error {
 func newRunCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "run <workflow> <prompt>",
-		Short: "Start a new run with a Lua workflow",
+		Short: "Start a new workflow run",
 		Args:  cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			workflowName := args[0]
@@ -99,8 +98,8 @@ func newRunCommand() *cobra.Command {
 				return fmt.Errorf("workflow %q not found (looked in %s and %s)", workflowName, cfg.ProjectWorkflowDir, cfg.UserWorkflowDir)
 			}
 
-			if !workflow.IsWorkflow(workflowPath) {
-				return fmt.Errorf("not a Lua workflow: %s", workflowPath)
+			if filepath.Ext(workflowPath) != ".js" {
+				return fmt.Errorf("not a workflow script: %s (expected .js)", workflowPath)
 			}
 
 			// Create run
@@ -167,14 +166,14 @@ func findWorkflow(name string, cfg *config.Config) string {
 	dirs := []string{cfg.ProjectWorkflowDir, cfg.UserWorkflowDir}
 
 	for _, dir := range dirs {
-		if strings.HasSuffix(name, ".lua") {
+		if strings.HasSuffix(name, ".js") {
 			path := filepath.Join(dir, name)
 			if _, err := os.Stat(path); err == nil {
 				return path
 			}
 		}
 
-		path := filepath.Join(dir, name+".lua")
+		path := filepath.Join(dir, name+".js")
 		if _, err := os.Stat(path); err == nil {
 			return path
 		}

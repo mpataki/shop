@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	lua "github.com/yuin/gopher-lua"
+	"github.com/dop251/goja"
 
 	"github.com/mpataki/shop/internal/events"
 	"github.com/mpataki/shop/internal/process"
@@ -25,14 +25,15 @@ type RuntimeDeps struct {
 	RepoPath       string
 
 	// Callbacks
-	EmitEvents    func(evts []events.Event) ([]events.Event, error)
-	DrainCommands func() error
+	EmitEvents     func(evts []events.Event) ([]events.Event, error)
+	DrainCommands  func() error
 	WriteMCPConfig func(callIndex int) error
 }
 
-// Runtime executes Lua workflow scripts in a sandboxed environment.
+// Runtime executes JavaScript workflow scripts in a sandboxed environment.
 type Runtime struct {
 	deps      RuntimeDeps
+	vm        *goja.Runtime
 	callIndex int
 	logs      []string
 
@@ -48,7 +49,7 @@ type Runtime struct {
 	waitingCallIndex int
 }
 
-// NewRuntime creates a new Lua runtime for executing a workflow.
+// NewRuntime creates a new JavaScript runtime for executing a workflow.
 func NewRuntime(deps RuntimeDeps) *Runtime {
 	return &Runtime{
 		deps: deps,
@@ -77,33 +78,30 @@ func (r *Runtime) GetWaitingInfo() *WaitingInfo {
 	}
 }
 
-// Execute runs the Lua workflow script.
+// Execute runs the JavaScript workflow script.
 func (r *Runtime) Execute(scriptPath, prompt string) error {
 	script, err := os.ReadFile(scriptPath)
 	if err != nil {
 		return fmt.Errorf("failed to read script: %w", err)
 	}
 
-	L := lua.NewState(lua.Options{SkipOpenLibs: true})
-	defer L.Close()
+	r.vm = goja.New()
+	r.sandbox()
+	r.registerAPI()
 
-	r.openSafeLibs(L)
-	r.registerAPI(L)
-
-	if err := L.DoString(string(script)); err != nil {
+	if _, err := r.vm.RunString(string(script)); err != nil {
 		return fmt.Errorf("failed to load script: %w", err)
 	}
 
-	workflow := L.GetGlobal("workflow")
-	if workflow == lua.LNil {
+	workflowFn, ok := goja.AssertFunction(r.vm.Get("workflow"))
+	if !ok {
 		return fmt.Errorf("script must define a 'workflow' function")
 	}
 
-	L.Push(workflow)
-	L.Push(lua.LString(prompt))
-	if err := L.PCall(1, 0, nil); err != nil {
+	_, err = workflowFn(goja.Undefined(), r.vm.ToValue(prompt))
+	if err != nil {
 		if r.isStuck {
-			return nil // stuck() was called; terminal event emitted by caller
+			return nil
 		}
 		if r.waitingHuman {
 			return ErrWaitingHuman
@@ -130,56 +128,51 @@ func (r *Runtime) StuckReason() string { return r.stuckReason }
 // GetLogs returns the logs collected during execution.
 func (r *Runtime) GetLogs() []string { return r.logs }
 
-// openSafeLibs loads only the safe standard libraries.
-func (r *Runtime) openSafeLibs(L *lua.LState) {
-	lua.OpenBase(L)
+// sandbox removes dangerous globals from the JS runtime.
+func (r *Runtime) sandbox() {
+	// Remove code generation from strings
+	r.vm.Set("eval", goja.Undefined())
 
-	L.SetGlobal("loadfile", lua.LNil)
-	L.SetGlobal("dofile", lua.LNil)
-	L.SetGlobal("load", lua.LNil)
-	L.SetGlobal("loadstring", lua.LNil)
-	L.SetGlobal("print", lua.LNil)
-
-	lua.OpenTable(L)
-	lua.OpenString(L)
-	lua.OpenMath(L)
-
-	math := L.GetGlobal("math")
-	if tbl, ok := math.(*lua.LTable); ok {
-		L.SetField(tbl, "random", lua.LNil)
-		L.SetField(tbl, "randomseed", lua.LNil)
+	// Remove non-deterministic functions
+	math := r.vm.Get("Math")
+	if mathObj, ok := math.(*goja.Object); ok {
+		mathObj.Set("random", goja.Undefined())
 	}
 }
 
 // registerAPI registers the shop-specific API functions.
-func (r *Runtime) registerAPI(L *lua.LState) {
-	L.SetGlobal("run", L.NewFunction(r.luaRun))
-	L.SetGlobal("stuck", L.NewFunction(r.luaStuck))
-	L.SetGlobal("context", L.NewFunction(r.luaContext))
-	L.SetGlobal("log", L.NewFunction(r.luaLog))
-	L.SetGlobal("pause", L.NewFunction(r.luaPause))
+func (r *Runtime) registerAPI() {
+	r.vm.Set("run", r.jsRun)
+	r.vm.Set("stuck", r.jsStuck)
+	r.vm.Set("context", r.jsContext)
+	r.vm.Set("log", r.jsLog)
+	r.vm.Set("pause", r.jsPause)
 }
 
 // ── run() ─────────────────────────────────────────────────────────────────────
 
-func (r *Runtime) luaRun(L *lua.LState) int {
-	agent := L.CheckString(1)
+func (r *Runtime) jsRun(call goja.FunctionCall) goja.Value {
+	arg0 := call.Argument(0)
+	if goja.IsUndefined(arg0) || goja.IsNull(arg0) {
+		panic(r.vm.NewTypeError("run() requires an agent name"))
+	}
+	agent := arg0.String()
 
 	var prompt, model string
-	if v := L.Get(2); v != lua.LNil {
-		switch v := v.(type) {
-		case lua.LString:
-			prompt = string(v)
-		case *lua.LTable:
-			if p := v.RawGetString("prompt"); p != lua.LNil {
-				prompt = p.String()
+	arg1 := call.Argument(1)
+	if !goja.IsUndefined(arg1) && !goja.IsNull(arg1) {
+		switch v := arg1.Export().(type) {
+		case string:
+			prompt = v
+		case map[string]any:
+			if p, ok := v["prompt"].(string); ok {
+				prompt = p
 			}
-			if m := v.RawGetString("model"); m != lua.LNil {
-				model = m.String()
+			if m, ok := v["model"].(string); ok {
+				model = m
 			}
 		default:
-			L.ArgError(2, "expected string or table")
-			return 0
+			panic(r.vm.NewTypeError("run() second argument must be a string or object"))
 		}
 	}
 
@@ -200,18 +193,14 @@ func (r *Runtime) luaRun(L *lua.LState) int {
 				signal := exec.Signal
 				if status, _ := signal["status"].(string); status == string(events.SignalNeedsHuman) {
 					r.setWaitingHuman(agent, idx, exec.SessionID, signal)
-					L.RaiseError("waiting for human: %s", r.waitingReason)
-					return 0
+					panic(r.vm.NewGoError(fmt.Errorf("waiting for human: %s", r.waitingReason)))
 				}
-				tbl := r.signalToTable(L, signal)
-				L.Push(tbl)
-				return 1
+				return r.vm.ToValue(signal)
 			}
 		}
 		if exec.Status == events.ExecStatusWaitingHuman {
 			r.setWaitingHuman(agent, idx, exec.SessionID, exec.Signal)
-			L.RaiseError("waiting for human: %s", r.waitingReason)
-			return 0
+			panic(r.vm.NewGoError(fmt.Errorf("waiting for human: %s", r.waitingReason)))
 		}
 	}
 
@@ -219,16 +208,12 @@ func (r *Runtime) luaRun(L *lua.LState) int {
 	signal, err := r.runAgent(agent, prompt, model, idx)
 	if err != nil {
 		if r.waitingHuman {
-			L.RaiseError("waiting for human: %s", r.waitingReason)
-			return 0
+			panic(r.vm.NewGoError(fmt.Errorf("waiting for human: %s", r.waitingReason)))
 		}
-		L.RaiseError("failed to run agent: %v", err)
-		return 0
+		panic(r.vm.NewGoError(fmt.Errorf("failed to run agent: %v", err)))
 	}
 
-	tbl := r.signalToTable(L, signal)
-	L.Push(tbl)
-	return 1
+	return r.vm.ToValue(signal)
 }
 
 func (r *Runtime) runAgent(agent, prompt, model string, callIndex int) (map[string]any, error) {
@@ -277,8 +262,6 @@ func (r *Runtime) runAgent(agent, prompt, model string, callIndex int) (map[stri
 	}
 
 	// Re-read state to get the signal written by MCP
-	// The DrainCommands call processes ReportSignal which emits SignalReceived
-	// The processor updates the projection, but we need to re-project
 	freshEvents, err := r.deps.Store.GetEvents(r.deps.State.ID)
 	if err != nil {
 		return nil, fmt.Errorf("re-read events: %w", err)
@@ -333,8 +316,12 @@ func (r *Runtime) runAgent(agent, prompt, model string, callIndex int) (map[stri
 
 // ── pause() ───────────────────────────────────────────────────────────────────
 
-func (r *Runtime) luaPause(L *lua.LState) int {
-	message := L.CheckString(1)
+func (r *Runtime) jsPause(call goja.FunctionCall) goja.Value {
+	arg0 := call.Argument(0)
+	if goja.IsUndefined(arg0) || goja.IsNull(arg0) {
+		panic(r.vm.NewTypeError("pause() requires a message"))
+	}
+	message := arg0.String()
 
 	r.callIndex++
 	idx := r.callIndex
@@ -342,12 +329,11 @@ func (r *Runtime) luaPause(L *lua.LState) int {
 	// Replay: check projection for completed checkpoint at this call_index
 	if exec := r.deps.State.GetExecutionByCallIndex(idx); exec != nil {
 		if exec.Status == events.ExecStatusCompleted && exec.Signal != nil {
-			return r.pauseResultFromSignal(L, exec.Signal)
+			return r.pauseResult(exec.Signal)
 		}
 		if exec.Status == events.ExecStatusWaitingHuman {
 			r.setWaitingHuman("_checkpoint", idx, exec.SessionID, exec.Signal)
-			L.RaiseError("waiting for human: %s", message)
-			return 0
+			panic(r.vm.NewGoError(fmt.Errorf("waiting for human: %s", message)))
 		}
 	}
 
@@ -355,14 +341,12 @@ func (r *Runtime) luaPause(L *lua.LState) int {
 	result, err := r.runCheckpoint(message, idx)
 	if err != nil {
 		if r.waitingHuman {
-			L.RaiseError("waiting for human: %s", message)
-			return 0
+			panic(r.vm.NewGoError(fmt.Errorf("waiting for human: %s", message)))
 		}
-		L.RaiseError("checkpoint failed: %v", err)
-		return 0
+		panic(r.vm.NewGoError(fmt.Errorf("checkpoint failed: %v", err)))
 	}
 
-	return r.pauseResultFromSignal(L, result)
+	return r.pauseResult(result)
 }
 
 func (r *Runtime) runCheckpoint(message string, callIndex int) (map[string]any, error) {
@@ -442,49 +426,56 @@ func (r *Runtime) runCheckpoint(message string, callIndex int) (map[string]any, 
 	return signal, nil
 }
 
-func (r *Runtime) pauseResultFromSignal(L *lua.LState, signal map[string]any) int {
-	tbl := L.NewTable()
+func (r *Runtime) pauseResult(signal map[string]any) goja.Value {
 	status, _ := signal["status"].(string)
-	L.SetField(tbl, "continue", lua.LBool(status == string(events.SignalContinue)))
+	result := map[string]any{
+		"continue": status == string(events.SignalContinue),
+	}
 	if reason, ok := signal["reason"].(string); ok && reason != "" {
-		L.SetField(tbl, "reason", lua.LString(reason))
+		result["reason"] = reason
 	}
 	if msg, ok := signal["message"].(string); ok && msg != "" {
-		L.SetField(tbl, "message", lua.LString(msg))
+		result["message"] = msg
 	}
-	L.Push(tbl)
-	return 1
+	return r.vm.ToValue(result)
 }
 
 // ── stuck() ───────────────────────────────────────────────────────────────────
 
-func (r *Runtime) luaStuck(L *lua.LState) int {
-	reason := L.OptString(1, "workflow stuck")
+func (r *Runtime) jsStuck(call goja.FunctionCall) goja.Value {
+	reason := "workflow stuck"
+	arg0 := call.Argument(0)
+	if !goja.IsUndefined(arg0) && !goja.IsNull(arg0) {
+		reason = arg0.String()
+	}
 	r.stuckReason = reason
 	r.isStuck = true
-	L.RaiseError("stuck: %s", reason)
-	return 0
+	panic(r.vm.NewGoError(fmt.Errorf("stuck: %s", reason)))
+	return goja.Undefined() // unreachable
 }
 
 // ── context() ─────────────────────────────────────────────────────────────────
 
-func (r *Runtime) luaContext(L *lua.LState) int {
-	tbl := L.NewTable()
-	L.SetField(tbl, "run_id", lua.LNumber(r.deps.State.ID))
-	L.SetField(tbl, "repo", lua.LString(r.deps.RepoPath))
-	L.SetField(tbl, "iteration", lua.LNumber(r.callIndex))
-	L.SetField(tbl, "prompt", lua.LString(r.deps.State.InitialPrompt))
-	L.Push(tbl)
-	return 1
+func (r *Runtime) jsContext(call goja.FunctionCall) goja.Value {
+	return r.vm.ToValue(map[string]any{
+		"run_id":    r.deps.State.ID,
+		"repo":      r.deps.RepoPath,
+		"iteration": r.callIndex,
+		"prompt":    r.deps.State.InitialPrompt,
+	})
 }
 
 // ── log() ─────────────────────────────────────────────────────────────────────
 
-func (r *Runtime) luaLog(L *lua.LState) int {
-	message := L.CheckString(1)
+func (r *Runtime) jsLog(call goja.FunctionCall) goja.Value {
+	arg0 := call.Argument(0)
+	if goja.IsUndefined(arg0) || goja.IsNull(arg0) {
+		panic(r.vm.NewTypeError("log() requires a message"))
+	}
+	message := arg0.String()
 	r.logs = append(r.logs, message)
 	r.emitLog(message)
-	return 0
+	return goja.Undefined()
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -503,41 +494,6 @@ func (r *Runtime) setWaitingHuman(agent string, callIndex int, sessionID string,
 		r.waitingReason = reason
 	} else {
 		r.waitingReason = "Agent needs human input"
-	}
-}
-
-func (r *Runtime) signalToTable(L *lua.LState, signal map[string]any) *lua.LTable {
-	tbl := L.NewTable()
-	for k, v := range signal {
-		L.SetField(tbl, k, r.goToLua(L, v))
-	}
-	return tbl
-}
-
-func (r *Runtime) goToLua(L *lua.LState, v any) lua.LValue {
-	switch val := v.(type) {
-	case nil:
-		return lua.LNil
-	case bool:
-		return lua.LBool(val)
-	case float64:
-		return lua.LNumber(val)
-	case string:
-		return lua.LString(val)
-	case []any:
-		tbl := L.NewTable()
-		for i, item := range val {
-			L.SetTable(tbl, lua.LNumber(i+1), r.goToLua(L, item))
-		}
-		return tbl
-	case map[string]any:
-		tbl := L.NewTable()
-		for k, item := range val {
-			L.SetField(tbl, k, r.goToLua(L, item))
-		}
-		return tbl
-	default:
-		return lua.LString(fmt.Sprintf("%v", val))
 	}
 }
 
@@ -581,7 +537,7 @@ Wait for the human to provide guidance before reporting your decision.`,
 		message, events.SignalContinue, events.SignalStop)
 }
 
-// IsWorkflow checks if a file is a Lua workflow.
+// IsWorkflow checks if a file is a JavaScript workflow.
 func IsWorkflow(path string) bool {
-	return filepath.Ext(path) == ".lua"
+	return filepath.Ext(path) == ".js"
 }

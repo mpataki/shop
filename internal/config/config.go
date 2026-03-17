@@ -53,7 +53,7 @@ func getEnv(key, defaultValue string) string {
 
 // WorkflowInfo contains metadata about a discovered workflow
 type WorkflowInfo struct {
-	Name   string // Display name (filename without .lua)
+	Name   string // Display name (filename without extension)
 	Path   string // Full path to the workflow file
 	Source string // "project" or "user"
 }
@@ -69,9 +69,9 @@ func (c *Config) ListWorkflows() ([]WorkflowInfo, error) {
 				continue
 			}
 			name := entry.Name()
-			if filepath.Ext(name) == ".lua" {
+			if filepath.Ext(name) == ".js" {
 				workflows = append(workflows, WorkflowInfo{
-					Name:   name[:len(name)-4], // Remove .lua extension
+					Name:   name[:len(name)-3], // Remove .js extension
 					Path:   filepath.Join(c.ProjectWorkflowDir, name),
 					Source: "project",
 				})
@@ -86,9 +86,9 @@ func (c *Config) ListWorkflows() ([]WorkflowInfo, error) {
 				continue
 			}
 			name := entry.Name()
-			if filepath.Ext(name) == ".lua" {
+			if filepath.Ext(name) == ".js" {
 				// Skip if already added from project dir
-				baseName := name[:len(name)-4]
+				baseName := name[:len(name)-3]
 				exists := false
 				for _, w := range workflows {
 					if w.Name == baseName {

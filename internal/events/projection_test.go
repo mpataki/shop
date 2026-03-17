@@ -8,7 +8,7 @@ import (
 func TestProjectRunStarted(t *testing.T) {
 	events := []Event{
 		MustNewEvent(1, EventRunStarted, RunStartedPayload{
-			WorkflowPath:  "/wf.lua",
+			WorkflowPath:  "/wf.js",
 			WorkflowName:  "deploy",
 			InitialPrompt: "deploy it",
 			WorkspacePath: "/tmp/ws",

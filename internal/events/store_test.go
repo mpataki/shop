@@ -29,7 +29,7 @@ func TestCreateRunAndAppendEvents(t *testing.T) {
 	}
 
 	e1 := MustNewEvent(runID, EventRunStarted, RunStartedPayload{
-		WorkflowPath: "/path/to/wf.lua",
+		WorkflowPath: "/path/to/wf.js",
 		WorkflowName: "test",
 		InitialPrompt: "hello",
 		WorkspacePath: "/tmp/ws",
