@@ -16,9 +16,9 @@ type Processor struct {
 	processManager process.Manager
 	workspacesDir  string
 
-	eventChan chan events.Event // outbound event notifications
-	mu        sync.Mutex
-	activeRuns map[int64]chan struct{} // notify channels per run
+	mu          sync.Mutex
+	activeRuns  map[int64]chan struct{} // notify channels per run
+	subscribers []chan events.Event     // fan-out event subscribers
 }
 
 // NewProcessor creates a command processor.
@@ -27,21 +27,30 @@ func NewProcessor(store *events.Store, pm process.Manager, workspacesDir string)
 		store:          store,
 		processManager: pm,
 		workspacesDir:  workspacesDir,
-		eventChan:      make(chan events.Event, 64),
 		activeRuns:     make(map[int64]chan struct{}),
 	}
 }
 
-// Subscribe returns a read-only channel of events emitted by the processor.
+// Subscribe returns a new channel that receives all events emitted by the processor.
+// Each subscriber gets its own channel (fan-out). Channels are buffered and
+// events are dropped if a subscriber falls behind.
 func (p *Processor) Subscribe() <-chan events.Event {
-	return p.eventChan
+	ch := make(chan events.Event, 64)
+	p.mu.Lock()
+	p.subscribers = append(p.subscribers, ch)
+	p.mu.Unlock()
+	return ch
 }
 
-// emit sends an event to subscribers without blocking.
+// emit sends an event to all subscribers without blocking.
 func (p *Processor) emit(e events.Event) {
-	select {
-	case p.eventChan <- e:
-	default:
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for _, ch := range p.subscribers {
+		select {
+		case ch <- e:
+		default:
+		}
 	}
 }
 

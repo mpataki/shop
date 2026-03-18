@@ -281,7 +281,7 @@ func (r *Runtime) runAgent(agent, prompt, model string, callIndex int, customSta
 			AgentName: agent, CallIndex: callIndex, Error: result.ErrorResult, ExitCode: result.ExitCode,
 		})
 		r.deps.EmitEvents([]events.Event{failEvt})
-		return map[string]any{"status": string(events.SignalError), "reason": result.ErrorResult}, nil
+		return nil, fmt.Errorf("agent %s failed (exit %d): %s", agent, result.ExitCode, result.ErrorResult)
 	}
 
 	// Find signal from projection
@@ -300,7 +300,7 @@ func (r *Runtime) runAgent(agent, prompt, model string, callIndex int, customSta
 			AgentName: agent, CallIndex: callIndex, Error: errReason, ExitCode: result.ExitCode,
 		})
 		r.deps.EmitEvents([]events.Event{failEvt})
-		return map[string]any{"status": string(events.SignalError), "reason": errReason}, nil
+		return nil, fmt.Errorf("agent %s failed: %s", agent, errReason)
 	}
 
 	// Include session ID

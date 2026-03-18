@@ -46,7 +46,8 @@ type App struct {
 	focusOnPrompt       bool
 
 	spinner spinner.Model
-	logs    []string // recent activity log (ring buffer)
+	eventCh <-chan events.Event // single subscription, reused
+	logs    []string            // recent activity log (ring buffer)
 	width   int
 	height  int
 	err     error
@@ -78,17 +79,19 @@ func NewApp(proc *commands.Processor, store *events.Store, cfg *config.Config) *
 		store:       store,
 		config:      cfg,
 		view:        ViewRunList,
+		eventCh:     proc.Subscribe(),
 		promptInput: ti,
 		spinner:     sp,
 	}
 }
 
 func (a *App) Init() tea.Cmd {
-	return tea.Batch(a.loadRuns, a.waitForEvent(), a.spinner.Tick)
+	a.reloadRuns()
+	return tea.Batch(a.waitForEvent(), a.spinner.Tick)
 }
 
 func (a *App) waitForEvent() tea.Cmd {
-	ch := a.processor.Subscribe()
+	ch := a.eventCh
 	return func() tea.Msg {
 		event, ok := <-ch
 		if !ok {
@@ -118,8 +121,6 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case processorEventMsg:
 		e := msg.event
-		var cmds []tea.Cmd
-		cmds = append(cmds, a.waitForEvent())
 
 		if line := a.formatEventLog(e); line != "" {
 			a.appendLog(line)
@@ -129,21 +130,12 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case events.EventLogMessage:
 			// Log-only — no data reload needed.
 		default:
-			switch a.view {
-			case ViewRunList:
-				cmds = append(cmds, a.loadRuns)
-			case ViewRunDetail:
-				if a.selectedRun != nil && e.RunID == a.selectedRun.ID {
-					cmds = append(cmds, a.loadRunDetail(a.selectedRun.ID))
-				}
+			a.reloadRuns()
+			if a.view == ViewRunDetail && a.selectedRun != nil && e.RunID == a.selectedRun.ID {
+				a.selectedRun, _ = a.store.ProjectRunFromDB(a.selectedRun.ID)
 			}
 		}
-		return a, tea.Batch(cmds...)
-
-	case runsLoadedMsg:
-		a.runs = msg.runs
-		a.err = msg.err
-		return a, nil
+		return a, a.waitForEvent()
 
 	case runDetailMsg:
 		a.selectedRun = msg.state
@@ -155,32 +147,35 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case runKilledMsg:
 		a.err = msg.err
-		return a, a.loadRuns
+		a.reloadRuns()
+		return a, nil
 
 	case sessionResumedMsg:
 		if msg.err != nil {
 			a.err = msg.err
 		}
 		a.view = ViewRunList
-		cmds := []tea.Cmd{a.loadRuns}
+		a.reloadRuns()
 		if msg.runID > 0 {
-			cmds = append(cmds, a.tryResumeAfterHuman(msg.runID))
+			return a, a.tryResumeAfterHuman(msg.runID)
 		}
-		return a, tea.Batch(cmds...)
+		return a, nil
 
 	case runDeletedMsg:
 		a.err = msg.err
 		if a.selectedIdx >= len(a.runs)-1 && a.selectedIdx > 0 {
 			a.selectedIdx--
 		}
-		return a, a.loadRuns
+		a.reloadRuns()
+		return a, nil
 
 	case runStoppedMsg:
 		a.err = msg.err
 		if a.view == ViewRunDetail && a.selectedRun != nil {
-			return a, a.loadRunDetail(a.selectedRun.ID)
+			a.selectedRun, _ = a.store.ProjectRunFromDB(a.selectedRun.ID)
 		}
-		return a, a.loadRuns
+		a.reloadRuns()
+		return a, nil
 
 	case outputLoadedMsg:
 		if msg.err != nil {
@@ -211,7 +206,8 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			a.view = ViewRunList
 		}
-		return a, a.loadRuns
+		a.reloadRuns()
+		return a, nil
 	}
 
 	return a, nil
@@ -282,6 +278,7 @@ func (a *App) handleRunDetailKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		a.view = ViewRunList
 		a.selectedRun = nil
 		a.selectedExecIdx = 0
+		a.reloadRuns()
 	case "up", "k":
 		if a.selectedExecIdx > 0 {
 			a.selectedExecIdx--
@@ -441,11 +438,6 @@ func (a *App) formatEventLog(e events.Event) string {
 
 // ── Messages ──────────────────────────────────────────────────────────────────
 
-type runsLoadedMsg struct {
-	runs []*events.RunState
-	err  error
-}
-
 type runDetailMsg struct {
 	state *events.RunState
 	err   error
@@ -489,10 +481,11 @@ type runStartedMsg struct {
 
 // ── Commands ──────────────────────────────────────────────────────────────────
 
-func (a *App) loadRuns() tea.Msg {
+func (a *App) reloadRuns() {
 	infos, err := a.store.ListRunIDs(20)
 	if err != nil {
-		return runsLoadedMsg{err: err}
+		a.err = err
+		return
 	}
 
 	var runs []*events.RunState
@@ -507,7 +500,7 @@ func (a *App) loadRuns() tea.Msg {
 		}
 	}
 
-	return runsLoadedMsg{runs: runs}
+	a.runs = runs
 }
 
 func (a *App) loadRunDetail(id int64) tea.Cmd {
